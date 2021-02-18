@@ -1,5 +1,6 @@
 from pathlib import Path
 import os
+import time
 
 import tensorflow as tf
 import pandas as pd
@@ -10,7 +11,7 @@ from tensorflow.python.ops.gen_string_ops import regex_full_match
 
 
 def to_np(x):
-    return np.transpose(sitk.GetArrayFromImage(x), (2, 1, 0))
+    return np.squeeze(np.transpose(sitk.GetArrayFromImage(x), (2, 1, 0)))
 
 
 def bb_intersection(*args):
@@ -37,10 +38,10 @@ def get_bb_mask_voxel(mask_sitk):
 
 def get_bb_mask_mm(mask_sitk):
     x_min, y_min, z_min, x_max, z_max, y_max = get_bb_mask_voxel(mask_sitk)
-    return (*mask_sitk.TransformContinuousIndexToPhysicalPoint(
-        [x_min, y_min, z_min]),
-            *mask_sitk.TransformContinuousIndexToPhysicalPoint(
-                [x_min, y_min, z_min]))
+    return (*mask_sitk.TransformIndexToPhysicalPoint(
+        [int(x_min), int(y_min), int(z_min)]),
+            *mask_sitk.TransformIndexToPhysicalPoint(
+                [int(x_max), int(y_max), int(z_max)]))
 
 
 def mask_center(mask_sitk):
@@ -50,13 +51,13 @@ def mask_center(mask_sitk):
         (y_min + y_max) / 2,
         (z_min + z_max) / 2,
     ]
-    return mask_sitk.TransformContinuousIndexToPhysicalPoint(center_ind)
+    return np.array(
+        mask_sitk.TransformContinuousIndexToPhysicalPoint(center_ind))
 
 
-def get_radius_mask(mask_sitk):
-    x_min, y_min, z_min, x_max, z_max, y_max = get_bb_mask_voxel(mask_sitk)
-    return np.sqrt((x_max - x_min)**2 + (y_max - y_min)**2 +
-                   (z_max - z_min)**2) * 0.5
+def get_radius_mask_2d(mask_sitk):
+    x_min, y_min, z_min, x_max, z_max, y_max = get_bb_mask_mm(mask_sitk)
+    return np.sqrt((x_max - x_min)**2 + (y_max - y_min)**2) * 0.5
 
 
 def bb_image(image):
@@ -71,7 +72,7 @@ def bb_image(image):
 def get_center(
         mask,
         bb_image,
-        output_shape=(128, 128, 128),
+        output_shape=(256, 256, 1),
         spacing=(1, 1, 1),
 ):
     center = mask_center(mask)
@@ -91,23 +92,27 @@ def get_center(
 
 def get_random_center(mask,
                       bb_image,
-                      output_shape=(128, 128, 128),
+                      output_shape=(256, 256, 1),
                       spacing=(1, 1, 1),
                       probability_include_mask=1.0):
     center_mask = mask_center(mask)
+    bb_mask = np.array(get_bb_mask_mm(mask))
     max_radius = (output_shape[0] // 2) * spacing[0]
     if np.random.random() < probability_include_mask:
-        max_radius -= get_radius_mask(mask)
+        max_radius -= np.min(bb_mask[3:5] - bb_mask[:2]) / 2
     else:
-        max_radius += get_radius_mask(mask)
+        max_radius += np.max(bb_mask[3:5] - bb_mask[:2])
 
     radius = np.sqrt(np.random.uniform(high=max_radius**2))
-    theta = np.random.uniform(high=np.pi)
-    phi = np.random.uniform(high=2 * np.pi)
-    delta_position = np.array([
-        radius * np.sin(theta) * np.cos(phi),
-        radius * np.sin(theta) * np.sin(phi), radius * np.cos(theta)
-    ])
+    # radius = max_radius
+    theta = np.random.uniform(high=2 * np.pi)
+    # delta_z = np.random.normal(scale=(bb_mask[-1] - bb_mask[2]) / 2 / 1.96)
+
+    dz = 0.9 * (bb_mask[-1] - bb_mask[2]) / 2
+    delta_z = np.random.uniform(low=-dz, high=dz)
+    # delta_z = 0
+    delta_position = np.array(
+        [radius * np.cos(theta), radius * np.sin(theta), delta_z])
 
     center = center_mask + delta_position
     pos_max = center + (np.array(output_shape) // 2) * spacing
@@ -143,7 +148,7 @@ def get_tf_dataset(
     augment_angles=None,
     augment_mirror=False,
     num_parallel_calls=None,
-    output_shape=(144, 144, 144),
+    output_shape=(256, 256),
     spacing=(1, 1, 1),
     ct_window_str="lung",
     return_patient_name=False,
@@ -196,7 +201,7 @@ def get_tf_dataset(
     if num_parallel_calls is None:
         num_parallel_calls = tf.data.experimental.AUTOTUNE
 
-    image_ds = patient_ds.map(f, num_parallel_calls=num_parallel_calls)
+    image_ds = patient_ds.map(f, num_parallel_calls=num_parallel_calls).cache()
     if return_patient_name is False:
         image_ds = image_ds.map(lambda x, y, z: (x, y))
     return image_ds
@@ -206,7 +211,7 @@ def tf_parse_image(
     patient,
     path_nii,
     path_lung_mask_nii,
-    output_shape=(128, 128, 128),
+    output_shape=(256, 256),
     spacing=(1, 1, 1),
     ct_window_str="lung",
     random_center=False,
@@ -234,8 +239,8 @@ def tf_parse_image(
     image, mask = tf.py_function(f,
                                  inp=[patient],
                                  Tout=(tf.float32, tf.float32))
-    image.set_shape(output_shape + (2, ))
-    mask.set_shape(output_shape + (4, ))
+    image.set_shape(output_shape + (3, ))
+    mask.set_shape(output_shape + (3, ))
 
     return image, mask
 
@@ -267,7 +272,7 @@ def parse_image(
     patient,
     path_nii,
     path_lung_mask_nii,
-    output_shape=(144, 144, 144),
+    output_shape=(256, 256),
     spacing=(1, 1, 1),
     ct_window_str="lung",
     random_center=False,
@@ -283,8 +288,11 @@ def parse_image(
         folder_name ([Path]): the path of the folder containing 
         the 3 sitk images (ct, pt and mask)
     """
+    if len(output_shape) == 2:
+        output_shape = tuple(output_shape) + (1, )
     output_shape = np.array(output_shape)
     patient_name = patient.numpy().decode("utf-8")
+    t1 = time.time()
     ct_sitk = sitk.ReadImage(
         str((path_nii / (patient_name + "__CT.nii.gz")).resolve()))
     pt_sitk = sitk.ReadImage(
@@ -298,6 +306,8 @@ def parse_image(
     mask_lung_sitk = sitk.ReadImage(
         str((path_lung_mask_nii /
              (patient_name + "__LUNG__SEG__CT.nii.gz")).resolve()))
+    print(f"Time reading the files for patient {patient} : {time.time()-t1}")
+    t1 = time.time()
     resampler = sitk.ResampleImageFilter()
     if interp_order == 3:
         resampler.SetInterpolator(sitk.sitkBSpline)
@@ -325,9 +335,11 @@ def parse_image(
     if augment_angles:
         augment_angles = np.array(augment_angles) * np.pi / 180
         transform = sitk.Euler3DTransform()
-        transform.SetCenter(np.squeeze(center))
-        transform.SetRotation(*(
-            np.random.random_sample(3) * 2 * augment_angles - augment_angles))
+        transform.SetCenter(mask_center(mask_gtvt_sitk))
+        angles = np.random.random_sample(
+            3) * 2 * augment_angles - augment_angles
+        transform.SetRotation(*angles)
+        # transform.SetRotation(*augment_angles) # debugging purpose
         resampler.SetTransform(transform)
 
     ct_sitk = resampler.Execute(ct_sitk)
@@ -358,12 +370,14 @@ def parse_image(
 
     pt = normalize_image(pt)
 
-    image = np.stack([ct, pt], axis=-1)
-    mask = np.stack([mask_gtvt, mask_gtvl, mask_lung1, mask_lung2], axis=-1)
+    image = np.stack([ct, pt, np.zeros_like(ct)], axis=-1)
+    mask = np.stack([mask_gtvt, mask_gtvl, mask_lung1 + mask_lung2], axis=-1)
     mask[mask >= 0.5] = 1
     mask[mask < 0.5] = 0
     if augment_mirror:
         if bool(random.getrandbits(1)):
             mask = np.flip(mask, axis=0)
             image = np.flip(image, axis=0)
+
+    print(f"Time preprocessing for patient {patient} : {time.time()-t1}")
     return image, mask

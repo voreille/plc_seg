@@ -7,12 +7,18 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import tensorflow as tf
 
-from src.models.fetch_data import get_tf_dataset, tf_parse_image, parse_image
-from src.models.models import Unet, UnetLight
+from src.models.fetch_data_2d import get_tf_dataset
+from src.models.models_2d import unet_model
+from src.models.losses_2d import dice_coe_loss, dice_coe_hard
 
 path_data_nii = Path(os.environ["NII_PATH"])
 path_mask_lung_nii = Path(os.environ["NII_LUNG_PATH"])
 path_clinical_info = Path(os.environ["CLINIC_INFO_PATH"])
+
+bs = 1
+n_epochs = 10
+n_prefetch = 20
+image_size = (224, 224)
 
 
 def main():
@@ -28,25 +34,31 @@ def main():
     patients_train = clinical_df[clinical_df["is_chuv"] == 1]["PatientID"]
     patient_train = [p for p in patients_train if p in patient_list]
 
-    data_test = get_tf_dataset(patient_test, path_data_nii, path_mask_lung_nii)
-    data_train = get_tf_dataset(patient_train,
-                                path_data_nii,
-                                path_mask_lung_nii,
-                                random_center=True,
-                                augment_angles=(45, 45, 90))
-    model = UnetLight()
+    data_test = get_tf_dataset(
+        patient_test,
+        path_data_nii,
+        path_mask_lung_nii,
+        output_shape=image_size,
+    ).batch(bs)
+
+    data_train = get_tf_dataset(
+        patient_train,
+        path_data_nii,
+        path_mask_lung_nii,
+        output_shape=image_size,
+        random_center=True,
+        augment_angles=(45, 45, 90),
+    ).batch(bs)
+    model = unet_model(3)
     optimizer = tf.keras.optimizers.Adam(learning_rate=1e-3)
 
-    model.compile(optimizer=optimizer,
-                  loss=None,
-                  metrics=None,
-                  loss_weights=None,
-                  weighted_metrics=None,
-                  run_eagerly=None,
-                  steps_per_execution=None,
-                  **kwargs)
+    model.compile(
+        optimizer=optimizer,
+        loss=dice_coe_loss,
+        metrics=dice_coe_hard,
+    )
 
-    model.fit(x=data_train, batch_size=1, epochs=1, validation_split=0.1)
+    model.fit(x=data_train, epochs=1000, validation_data=data_test)
 
 
 if __name__ == '__main__':
