@@ -108,8 +108,7 @@ def get_tf_dataset(
     if num_parallel_calls is None:
         num_parallel_calls = tf.data.experimental.AUTOTUNE
 
-    volume_ds = patient_ds.map(f1,
-                               num_parallel_calls=num_parallel_calls)
+    volume_ds = patient_ds.map(f1, num_parallel_calls=num_parallel_calls).cache()
     image_ds = volume_ds.map(f2, num_parallel_calls=num_parallel_calls)
 
     # if return_patient_name is False:
@@ -198,10 +197,10 @@ def tf_parse_image(
                                                    Tout=(
                                                        tf.float32,
                                                        tf.float32,
-                                                       tf.float32,
-                                                       tf.float32,
-                                                       tf.float32,
-                                                       tf.float32,
+                                                       tf.uint8,
+                                                       tf.uint8,
+                                                       tf.uint8,
+                                                       tf.uint8,
                                                        tf.float32,
                                                        tf.float32,
                                                        tf.float32,
@@ -243,10 +242,10 @@ def parse_image(
              (patient_name + "__LUNG__SEG__CT.nii.gz")).resolve()))
 
     mask_lung1_sitk, mask_lung2_sitk = split_lung_mask(mask_lung_sitk)
-    mask_gtvt = to_np(mask_gtvt_sitk)
-    mask_gtvl = to_np(mask_gtvl_sitk)
-    mask_lung1 = to_np(mask_lung1_sitk)
-    mask_lung2 = to_np(mask_lung2_sitk)
+    mask_gtvt = to_np(mask_gtvt_sitk).astype(np.uint8)
+    mask_gtvl = to_np(mask_gtvl_sitk).astype(np.uint8)
+    mask_lung1 = to_np(mask_lung1_sitk).astype(np.uint8)
+    mask_lung2 = to_np(mask_lung2_sitk).astype(np.uint8)
 
     coordinate_matrix_ct = compute_coordinate_matrix(
         origin=ct_sitk.GetOrigin(),

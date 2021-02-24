@@ -230,7 +230,6 @@ def slice_image(ct,
                 interp_order_mask=0,
                 fill_mode='constant',
                 fill_value=0.0):
-    print(f"c0est ca le dtype {mask_lung1.dtype}")
     mask_lung = mask_lung1 + mask_lung2
     # mask_lung[np.where(mask_lung != 0)] = 1
 
