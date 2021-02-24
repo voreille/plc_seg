@@ -1,5 +1,6 @@
 from pathlib import Path
 import os
+import time
 
 import tensorflow as tf
 import pandas as pd
@@ -285,6 +286,7 @@ def parse_image(
     """
     output_shape = np.array(output_shape)
     patient_name = patient.numpy().decode("utf-8")
+    t1 = time.time()
     ct_sitk = sitk.ReadImage(
         str((path_nii / (patient_name + "__CT.nii.gz")).resolve()))
     pt_sitk = sitk.ReadImage(
@@ -298,6 +300,8 @@ def parse_image(
     mask_lung_sitk = sitk.ReadImage(
         str((path_lung_mask_nii /
              (patient_name + "__LUNG__SEG__CT.nii.gz")).resolve()))
+    print(f"Time reading the files for patient {patient} : {time.time()-t1}")
+    t1 = time.time()
     resampler = sitk.ResampleImageFilter()
     if interp_order == 3:
         resampler.SetInterpolator(sitk.sitkBSpline)
@@ -366,4 +370,5 @@ def parse_image(
         if bool(random.getrandbits(1)):
             mask = np.flip(mask, axis=0)
             image = np.flip(image, axis=0)
+    print(f"Time preprocessing for patient {patient} : {time.time()-t1}")
     return image, mask

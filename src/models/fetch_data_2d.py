@@ -1,6 +1,6 @@
 from pathlib import Path
 import os
-import time
+# import time
 
 import tensorflow as tf
 import pandas as pd
@@ -201,7 +201,7 @@ def get_tf_dataset(
     if num_parallel_calls is None:
         num_parallel_calls = tf.data.experimental.AUTOTUNE
 
-    image_ds = patient_ds.map(f, num_parallel_calls=num_parallel_calls).cache()
+    image_ds = patient_ds.map(f, num_parallel_calls=num_parallel_calls)
     if return_patient_name is False:
         image_ds = image_ds.map(lambda x, y, z: (x, y))
     return image_ds
@@ -240,7 +240,7 @@ def tf_parse_image(
                                  inp=[patient],
                                  Tout=(tf.float32, tf.float32))
     image.set_shape(output_shape + (3, ))
-    mask.set_shape(output_shape + (3, ))
+    mask.set_shape(output_shape + (4, ))
 
     return image, mask
 
@@ -292,7 +292,7 @@ def parse_image(
         output_shape = tuple(output_shape) + (1, )
     output_shape = np.array(output_shape)
     patient_name = patient.numpy().decode("utf-8")
-    t1 = time.time()
+    # t1 = time.time()
     ct_sitk = sitk.ReadImage(
         str((path_nii / (patient_name + "__CT.nii.gz")).resolve()))
     pt_sitk = sitk.ReadImage(
@@ -306,8 +306,8 @@ def parse_image(
     mask_lung_sitk = sitk.ReadImage(
         str((path_lung_mask_nii /
              (patient_name + "__LUNG__SEG__CT.nii.gz")).resolve()))
-    print(f"Time reading the files for patient {patient} : {time.time()-t1}")
-    t1 = time.time()
+    # print(f"Time reading the files for patient {patient} : {time.time()-t1}")
+    # t1 = time.time()
     resampler = sitk.ResampleImageFilter()
     if interp_order == 3:
         resampler.SetInterpolator(sitk.sitkBSpline)
@@ -371,7 +371,7 @@ def parse_image(
     pt = normalize_image(pt)
 
     image = np.stack([ct, pt, np.zeros_like(ct)], axis=-1)
-    mask = np.stack([mask_gtvt, mask_gtvl, mask_lung1 + mask_lung2], axis=-1)
+    mask = np.stack([mask_gtvt, mask_gtvl, mask_lung1, mask_lung2], axis=-1)
     mask[mask >= 0.5] = 1
     mask[mask < 0.5] = 0
     if augment_mirror:
@@ -379,5 +379,5 @@ def parse_image(
             mask = np.flip(mask, axis=0)
             image = np.flip(image, axis=0)
 
-    print(f"Time preprocessing for patient {patient} : {time.time()-t1}")
+    # print(f"Time preprocessing for patient {patient} : {time.time()-t1}")
     return image, mask

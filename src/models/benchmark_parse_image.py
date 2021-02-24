@@ -6,7 +6,7 @@ import SimpleITK as sitk
 import matplotlib.pyplot as plt
 import tensorflow as tf
 
-from src.models.fetch_data_2d import get_tf_dataset, tf_parse_image, parse_image
+from src.models.fetch_data import get_tf_dataset, tf_parse_image, parse_image
 
 path_data_nii = Path("/home/val/python_wkspce/plc_seg/data/interim/nii_raw")
 path_mask_lung_nii = Path(

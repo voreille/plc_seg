@@ -7,7 +7,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import tensorflow as tf
 
-from src.models.fetch_data_2d import get_tf_dataset
+from src.models.fetch_data_2d_fixed import get_tf_dataset
 from src.models.models_2d import unet_model
 from src.models.losses_2d import dice_coe_loss, dice_coe_hard
 
@@ -18,7 +18,7 @@ path_clinical_info = Path(os.environ["CLINIC_INFO_PATH"])
 bs = 1
 n_epochs = 10
 n_prefetch = 20
-image_size = (224, 224)
+image_size = (256, 256)
 
 
 def main():
@@ -38,6 +38,7 @@ def main():
         patient_test,
         path_data_nii,
         path_mask_lung_nii,
+        num_parallel_calls=15,
         output_shape=image_size,
     ).batch(bs)
 
@@ -46,10 +47,11 @@ def main():
         path_data_nii,
         path_mask_lung_nii,
         output_shape=image_size,
-        random_center=True,
-        augment_angles=(45, 45, 90),
+        num_parallel_calls=15,
+        # random_center=True,
+        # augment_angles=(45, 45, 90)
     ).batch(bs)
-    model = unet_model(3)
+    model = unet_model(3, input_shape=image_size + (3, ))
     optimizer = tf.keras.optimizers.Adam(learning_rate=1e-3)
 
     model.compile(

@@ -21,21 +21,10 @@ patient_list = [
 patient_list = patient_list[:1]
 patient_ds = tf.data.Dataset.from_tensor_slices(patient_list)
 
-sitk_volume_ds = patient_ds.map(lambda patient_name: (*tf_parse_image(
-    patient_name,
-    Path(path_data_nii),
-    Path(path_mask_lung_nii),
-), )).as_numpy_iterator()
 
-f = lambda inp: slice_image(inp,
-                            augment_angles=(0, 0, 0),
-                            output_shape=(256, 256),
-                            spacing=(1, 1, 1),
-                            random_center=False,
-                            interp_order_image=3,
-                            interp_order_mask=0,
-                            fill_mode='constant',
-                            fill_value=0.0)
+def f(patient):
+    return parse_image(patient, path_data_nii, path_mask_lung_nii)
 
-for p in sitk_volume_ds:
-    image, mask = f(p)
+
+for p in patient_list:
+    result = f(p)
