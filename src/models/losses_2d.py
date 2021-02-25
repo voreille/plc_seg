@@ -2,17 +2,6 @@ import tensorflow as tf
 import tensorflow.keras.backend as K
 
 
-def dice_coe_loss_1(y_true, y_pred, loss_type='jaccard', smooth=1.):
-    return 1 - dice_coe_1(y_true, y_pred, loss_type=loss_type, smooth=smooth)
-
-
-def dice_coe_hard_1(y_true, y_pred, loss_type='sorensen', smooth=1.):
-    return dice_coe(y_true,
-                    tf.cast(y_pred > 0.5, tf.float32),
-                    loss_type=loss_type,
-                    smooth=smooth)
-
-
 def dice_coe_1(y_true, y_pred, loss_type='jaccard', smooth=1., axis=(1, 2)):
     intersection = tf.reduce_sum(y_true * y_pred, axis=axis)
     if loss_type == 'jaccard':
@@ -27,7 +16,7 @@ def dice_coe_1(y_true, y_pred, loss_type='jaccard', smooth=1., axis=(1, 2)):
 
     else:
         raise ValueError("Unknown `loss_type`: %s" % loss_type)
-    return tf.reduce_mean((2. * intersection + smooth) / (union + smooth))
+    return (2. * intersection + smooth) / (union + smooth)
 
 
 def dice_coe_loss(y_true, y_pred, loss_type='jaccard', smooth=1.):

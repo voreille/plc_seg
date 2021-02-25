@@ -20,7 +20,7 @@ path_data_nii = Path(os.environ["NII_PATH"])
 path_mask_lung_nii = Path(os.environ["NII_LUNG_PATH"])
 path_clinical_info = Path(os.environ["CLINIC_INFO_PATH"])
 
-path_output = project_dir / "data/processed/2d"
+path_output = project_dir / "data/processed/2d_pet_normalized"
 
 path_output.mkdir(parents=True, exist_ok=True)
 
@@ -130,7 +130,7 @@ def parse_image(
     ct[ct < hu_low] = hu_low
     ct = (2 * ct - hu_high - hu_low) / (hu_high - hu_low)
 
-    # pt = normalize_image(pt)
+    pt = normalize_image(pt)
 
     image = np.stack([ct, pt, np.zeros_like(ct)], axis=-1)
     mask = np.stack([mask_gtvt, mask_gtvl, mask_lung1, mask_lung2], axis=-1)
