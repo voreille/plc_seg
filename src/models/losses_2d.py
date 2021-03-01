@@ -2,6 +2,19 @@ import tensorflow as tf
 import tensorflow.keras.backend as K
 
 
+def masked_focal_loss(y_true, y_pred, mask, gamma=2):
+    n_pos = tf.reduce_sum(y_true)
+    return -tf.reduce_sum(y_true * tf.math.log(y_pred) *
+                          (1 - y_pred)**gamma) / n_pos
+
+
+def dice_coe_1_hard(y_true, y_pred, loss_type='sorensen', smooth=1.):
+    return dice_coe_1(y_true,
+                      tf.cast(y_pred > 0.5, tf.float32),
+                      loss_type=loss_type,
+                      smooth=smooth)
+
+
 def dice_coe_1(y_true, y_pred, loss_type='jaccard', smooth=1., axis=(1, 2)):
     intersection = tf.reduce_sum(y_true * y_pred, axis=axis)
     if loss_type == 'jaccard':

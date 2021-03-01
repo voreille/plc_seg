@@ -16,8 +16,10 @@ dotenv_path = project_dir / ".env"
 
 dotenv.load_dotenv(str(dotenv_path))
 
-path_data_nii = Path(os.environ["NII_PATH"])
-path_mask_lung_nii = Path(os.environ["NII_LUNG_PATH"])
+path_data_nii = Path(
+    "/home/val/python_wkspce/plc_seg/data/interim/nii_resampled")
+path_mask_lung_nii = Path(
+    "/home/val/python_wkspce/plc_seg/data/interim/nii_resampled")
 path_clinical_info = Path(os.environ["CLINIC_INFO_PATH"])
 
 path_output = project_dir / "data/processed/2d_pet_normalized"
@@ -32,7 +34,18 @@ def to_np(x):
     return np.squeeze(np.transpose(sitk.GetArrayFromImage(x), (2, 1, 0)))
 
 
-def get_bb_mask_voxel(mask_sitk):
+def get_bb_mask_voxel(mask):
+    positions = np.where(mask != 0)
+    x_min = np.min(positions[0])
+    y_min = np.min(positions[1])
+    z_min = np.min(positions[2])
+    x_max = np.max(positions[0])
+    y_max = np.max(positions[1])
+    z_max = np.max(positions[2])
+    return x_min, y_min, z_min, x_max, y_max, z_max
+
+
+def get_bb_mask_sitk_voxel(mask_sitk):
     mask = sitk.GetArrayFromImage(mask_sitk)
     positions = np.where(mask != 0)
     z_min = np.min(positions[0])
@@ -41,26 +54,31 @@ def get_bb_mask_voxel(mask_sitk):
     z_max = np.max(positions[0])
     y_max = np.max(positions[1])
     x_max = np.max(positions[2])
-    return x_min, y_min, z_min, x_max, z_max, y_max
+    return x_min, y_min, z_min, x_max, y_max, z_max
 
 
 def get_bb_mask_mm(mask_sitk):
-    x_min, y_min, z_min, x_max, z_max, y_max = get_bb_mask_voxel(mask_sitk)
+    x_min, y_min, z_min, x_max, y_max, z_max = get_bb_mask_sitk_voxel(
+        mask_sitk)
     return (*mask_sitk.TransformIndexToPhysicalPoint(
         [int(x_min), int(y_min), int(z_min)]),
             *mask_sitk.TransformIndexToPhysicalPoint(
                 [int(x_max), int(y_max), int(z_max)]))
 
 
+def slice_volumes(*args, s1=0, s2=-1):
+    output = []
+    for im in args:
+        output.append(im[:, :, s1:s2 + 1])
+
+    return output
+
+
 def parse_image(
-    patient,
+    patient_name,
     path_nii,
     path_lung_mask_nii,
-    output_shape=(512, 512),
-    spacing=(1, 1, 1),
     ct_window_str="lung",
-    augment_mirror=False,
-    interp_order=3,
     mask_smoothing=False,
     smoothing_radius=3,
 ):
@@ -70,8 +88,6 @@ def parse_image(
         folder_name ([Path]): the path of the folder containing 
         the 3 sitk images (ct, pt and mask)
     """
-    output_shape = np.array(output_shape)
-    patient_name = patient
     # t1 = time.time()
     ct_sitk = sitk.ReadImage(
         str((path_nii / (patient_name + "__CT.nii.gz")).resolve()))
@@ -88,28 +104,11 @@ def parse_image(
              (patient_name + "__LUNG__SEG__CT.nii.gz")).resolve()))
     # print(f"Time reading the files for patient {patient} : {time.time()-t1}")
     # t1 = time.time()
-    resampler = sitk.ResampleImageFilter()
-    if interp_order == 3:
-        resampler.SetInterpolator(sitk.sitkBSpline)
     # compute center
-    bb_gtvt = get_bb_mask_mm(mask_gtvt_sitk)
-    bb_gtvl = get_bb_mask_mm(mask_gtvl_sitk)
-    z_max = np.max([bb_gtvt[-1], bb_gtvl[-1]])
-    z_min = np.min([bb_gtvt[2], bb_gtvl[2]])
-    origin = np.array(ct_sitk.GetOrigin())
-    origin[2] = z_min
-    z_shape = int((z_max - z_min) / spacing[2])
-
-    resampler.SetOutputOrigin(origin)
-    resampler.SetOutputSpacing(spacing)
-    resampler.SetSize((int(output_shape[0]), int(output_shape[1]), z_shape))
-
-    ct_sitk = resampler.Execute(ct_sitk)
-    pt_sitk = resampler.Execute(pt_sitk)
-    resampler.SetInterpolator(sitk.sitkNearestNeighbor)
-    mask_gtvt_sitk = resampler.Execute(mask_gtvt_sitk)
-    mask_gtvl_sitk = resampler.Execute(mask_gtvl_sitk)
-    mask_lung_sitk = resampler.Execute(mask_lung_sitk)
+    # bb_gtvt = get_bb_mask_mm(mask_gtvt_sitk)
+    # bb_gtvl = get_bb_mask_mm(mask_gtvl_sitk)
+    # z_max = np.max([bb_gtvt[-1], bb_gtvl[-1]])
+    # z_min = np.min([bb_gtvt[2], bb_gtvl[2]])
     mask_lung1_sitk, mask_lung2_sitk = split_lung_mask(mask_lung_sitk)
     if mask_smoothing:
         smoother = sitk.BinaryMedianImageFilter()
@@ -132,13 +131,34 @@ def parse_image(
 
     pt = normalize_image(pt)
 
+    bb_gtvt = get_bb_mask_voxel(mask_gtvt)
+    bb_gtvl = get_bb_mask_voxel(mask_gtvl)
+    z_max = np.max([bb_gtvt[-1], bb_gtvl[-1]])
+    z_min = np.min([bb_gtvt[2], bb_gtvl[2]])
+
+    ct, pt, mask_gtvt, mask_gtvl, mask_lung1, mask_lung2 = slice_volumes(
+        ct,
+        pt,
+        mask_gtvt,
+        mask_gtvl,
+        mask_lung1,
+        mask_lung2,
+        s1=z_min,
+        s2=z_max)
+
     image = np.stack([ct, pt, np.zeros_like(ct)], axis=-1)
     mask = np.stack([mask_gtvt, mask_gtvl, mask_lung1, mask_lung2], axis=-1)
+    # mask = np.zeros_like(mask_gtvt)
+    # mask[mask_gtvt >= 0.5] = 1
+    # mask[mask_gtvl >= 0.5] = 2
+    # mask[mask_lung1 >= 0.5] = 3
+    # mask[mask_lung2 >= 0.5] = 4
+
     mask[mask >= 0.5] = 1
     mask[mask < 0.5] = 0
 
     # print(f"Time preprocessing for patient {patient} : {time.time()-t1}")
-    return image, mask
+    return image, mask.astype(np.uint8)
 
 
 def main():
@@ -148,7 +168,7 @@ def main():
     patient_list = [
         f.name.split("__")[0] for f in path_mask_lung_nii.rglob("*LUNG*")
     ]
-    clinical_df = pd.read_excel(path_clinical_info)
+    clinical_df = pd.read_csv(path_clinical_info)
     clinical_df["PatientID"] = clinical_df["patient_id"].map(
         lambda x: "PatientLC_" + str(x))
     patients_test = clinical_df[clinical_df["is_chuv"] == 0]["PatientID"]

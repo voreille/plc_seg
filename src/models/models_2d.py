@@ -1,6 +1,9 @@
 import tensorflow as tf
 
-from src.models.losses_2d import dice_coe_1
+from src.models.losses_2d import dice_coe_1, dice_coe_1_hard
+from src.models.focal_loss import binary_focal_loss
+
+import matplotlib.pyplot as plt
 
 OUTPUT_CHANNELS = 3
 
@@ -70,6 +73,7 @@ def unet_model(output_channels, input_shape=(256, 256, 3)):
     last = tf.keras.layers.Conv2DTranspose(output_channels,
                                            3,
                                            strides=2,
+                                           activation="sigmoid",
                                            padding='same')  #64x64 -> 128x128
 
     x = last(x)
@@ -77,52 +81,95 @@ def unet_model(output_channels, input_shape=(256, 256, 3)):
     return tf.keras.Model(inputs=inputs, outputs=x)
 
 
-def get_mask(y_true):
-    if tf.reduce_sum(y_true[..., 2] * y_true[..., 1]) != 0:
-        sick_lung = y_true[..., 2]
+def get_mask(y_true, sick_lung_axis):
+    if sick_lung_axis == 9:
+        return tf.ones(y_true[..., 3].shape)
     else:
-        sick_lung = y_true[..., 3]
-    mask = 1 - (sick_lung - y_true[..., 0] - y_true[..., 2])
-    return mask
+        return 1 - (y_true[..., sick_lung_axis] - y_true[..., 1] -
+                    y_true[..., 0])
 
 
-def custom_loss(y_true, y_pred, plc_status):
+def custom_loss(
+    y_true,
+    y_pred,
+    plc_status,
+    sick_lung_axis,
+    pos_weight=1.0,
+    w_lung=1,
+    w_gtvt=1,
+    w_gtvl=4,
+):
     """ 0: gtvt, 1: gtvl, 2: lung1, 3: lung2
 
     Args:
         y_true ([type]): [description]
         y_pred ([type]): [description]
     """
-    mask = tf.map_fn(fn=get_mask, elems=y_true)
-    mask = tf.where(mask > 0.9, x=1.0, y=0.0)
+    mask = 1 - tf.where(sick_lung_axis[..., tf.newaxis] == 3,
+                        x=y_true[..., 3],
+                        y=y_true[..., 2]) + y_true[..., 1] + y_true[..., 0]
+    mask = tf.where(mask > 0.5, x=1.0, y=0.0)
+    n_elems = tf.reduce_sum(mask, axis=(1, 2))
     # print(f"hey its the shape of the mask {mask.shape}")
 
-    lung = y_true[..., 2] + y_true[..., 3]
+    loss = (w_gtvt * (1 - dice_coe_1(y_true[..., 0], y_pred[..., 0])) +
+            w_lung *
+            (1 - dice_coe_1(y_true[..., 2] + y_true[..., 3], y_pred[..., 2])))
 
-    loss = -(dice_coe_1(y_true[..., 0], y_pred[..., 0]) +
-             dice_coe_1(lung, y_pred[..., 2]))
-
-    return 3 + tf.reduce_mean(
+    return 10 * tf.reduce_mean(
         tf.where(
-            plc_status >= 0.1,
-            x=loss - dice_coe_1(mask * y_true[..., 1], mask * y_pred[..., 1]),
-            y=loss -
-            dice_coe_1(tf.zeros(tf.shape(y_pred[..., 1])), y_pred[..., 1]),
-        ))
+            tf.squeeze(plc_status) >= 0.5,
+            x=loss + w_gtvl * tf.reduce_sum(binary_focal_loss(
+                y_true[..., 1], y_pred[..., 1], pos_weight=pos_weight) * mask,
+                                            axis=(1, 2)) / n_elems,
+            y=loss + w_gtvl * tf.reduce_mean(
+                binary_focal_loss(tf.zeros(tf.shape(y_pred[..., 1])),
+                                  y_pred[..., 1],
+                                  pos_weight=pos_weight),
+                axis=(1, 2)))) / (w_lung + w_gtvl + w_gtvt)
 
 
 loss_tracker = tf.keras.metrics.Mean(name="loss")
-mae_metric = tf.keras.metrics.MeanAbsoluteError(name="mae")
+gtvt_dice_tracker = tf.keras.metrics.Mean(name="gtvt_dice")
+lung_dice_tracker = tf.keras.metrics.Mean(name="lung_dice")
+
+val_loss_tracker = tf.keras.metrics.Mean(name="val_loss")
+val_gtvt_dice_tracker = tf.keras.metrics.Mean(name="val_gtvt_dice")
+val_lung_dice_tracker = tf.keras.metrics.Mean(name="val_lung_dice")
 
 
 class CustomModel(tf.keras.Model):
+    def __init__(
+        self,
+        *args,
+        alpha=1.0,
+        w_lung=1.0,
+        w_gtvt=1.0,
+        w_gtvl=4.0,
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+        self.alpha = alpha
+        self.w_lung = w_lung
+        self.w_gtvt = w_gtvt
+        self.w_gtvl = w_gtvl
+
     def train_step(self, data):
-        x, y, plc_status = data
+        x, y, plc_status, sick_lung_axis = data
 
         with tf.GradientTape() as tape:
             y_pred = self(x, training=True)  # Forward pass
             # Compute our own loss
-            loss = custom_loss(y, y_pred, plc_status)
+            loss = custom_loss(
+                y,
+                y_pred,
+                plc_status,
+                sick_lung_axis,
+                pos_weight=self.alpha,
+                w_lung=self.w_lung,
+                w_gtvt=self.w_gtvt,
+                w_gtvl=self.w_gtvl,
+            )
 
         # Compute gradients
         trainable_vars = self.trainable_variables
@@ -131,24 +178,45 @@ class CustomModel(tf.keras.Model):
         # Update weights
         self.optimizer.apply_gradients(zip(gradients, trainable_vars))
 
-        # # Compute our own metrics
-        # mae_metric.update_state(y, y_pred)
-        # return {"loss": loss_tracker.result(), "mae": mae_metric.result()}
-        return {"loss": loss}
+        loss_tracker.update_state(loss)
+        gtvt_dice_tracker.update_state(
+            tf.reduce_mean(dice_coe_1_hard(y[..., 0], y_pred[..., 0])))
+        lung_dice_tracker.update_state(
+            tf.reduce_mean(
+                dice_coe_1_hard(y[..., 2] + y[..., 3], y_pred[..., 2])))
+        return {
+            "loss": loss_tracker.result(),
+            "dice_gtvt": gtvt_dice_tracker.result(),
+            "dice_lung": lung_dice_tracker.result()
+        }
 
     def test_step(self, data):
         # Unpack the data
-        x, y, plc_status = data
+        x, y, plc_status, sick_lung_axis = data
         # Compute predictions
         y_pred = self(x, training=False)
 
-        return {"loss_val": custom_loss(y, y_pred, plc_status)}
+        val_loss_tracker.update_state(
+            custom_loss(y, y_pred, plc_status, sick_lung_axis))
+        val_gtvt_dice_tracker.update_state(
+            tf.reduce_mean(dice_coe_1_hard(y[..., 0], y_pred[..., 0])))
+        val_lung_dice_tracker.update_state(
+            tf.reduce_mean(
+                dice_coe_1_hard(y[..., 2] + y[..., 3], y_pred[..., 2])))
+        return {
+            "loss_val": val_loss_tracker.result(),
+            "dice_gtvt": val_gtvt_dice_tracker.result(),
+            "dice_lung": val_lung_dice_tracker.result()
+        }
 
-    # @property
-    # def metrics(self):
-    #     # We list our `Metric` objects here so that `reset_states()` can be
-    #     # called automatically at the start of each epoch
-    #     # or at the start of `evaluate()`.
-    #     # If you don't implement this property, you have to call
-    #     # `reset_states()` yourself at the time of your choosing.
-    #     return [loss_tracker, mae_metric]
+    @property
+    def metrics(self):
+        # We list our `Metric` objects here so that `reset_states()` can be
+        # called automatically at the start of each epoch
+        # or at the start of `evaluate()`.
+        # If you don't implement this property, you have to call
+        # `reset_states()` yourself at the time of your choosing.
+        return [
+            loss_tracker, gtvt_dice_tracker, lung_dice_tracker,
+            val_loss_tracker, val_gtvt_dice_tracker, val_lung_dice_tracker
+        ]
