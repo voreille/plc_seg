@@ -89,6 +89,30 @@ def get_mask(y_true, sick_lung_axis):
                     y_true[..., 0])
 
 
+def gtvl_loss(
+    y_true,
+    y_pred,
+    plc_status,
+    sick_lung_axis,
+    pos_weight=1.0,
+    scaling=10.0,
+):
+    mask = 1 - tf.where(sick_lung_axis[..., tf.newaxis] == 3,
+                        x=y_true[..., 3],
+                        y=y_true[..., 2]) + y_true[..., 1] + y_true[..., 0]
+    mask = tf.where(mask > 0.5, x=1.0, y=0.0)
+    n_elems = tf.reduce_sum(mask, axis=(1, 2))
+    return scaling * tf.where(
+        tf.squeeze(plc_status) >= 0.5,
+        x=tf.reduce_sum(binary_focal_loss(
+            y_true[..., 1], y_pred[..., 1], pos_weight=pos_weight) * mask,
+                        axis=(1, 2)) / n_elems,
+        y=tf.reduce_mean(binary_focal_loss(tf.zeros(tf.shape(y_pred[..., 1])),
+                                           y_pred[..., 1],
+                                           pos_weight=pos_weight),
+                         axis=(1, 2)))
+
+
 def custom_loss(
     y_true,
     y_pred,
@@ -98,6 +122,7 @@ def custom_loss(
     w_lung=1,
     w_gtvt=1,
     w_gtvl=4,
+    s_gtvl=10,
 ):
     """ 0: gtvt, 1: gtvl, 2: lung1, 3: lung2
 
@@ -105,35 +130,27 @@ def custom_loss(
         y_true ([type]): [description]
         y_pred ([type]): [description]
     """
-    mask = 1 - tf.where(sick_lung_axis[..., tf.newaxis] == 3,
-                        x=y_true[..., 3],
-                        y=y_true[..., 2]) + y_true[..., 1] + y_true[..., 0]
-    mask = tf.where(mask > 0.5, x=1.0, y=0.0)
-    n_elems = tf.reduce_sum(mask, axis=(1, 2))
-    # print(f"hey its the shape of the mask {mask.shape}")
-
-    loss = (w_gtvt * (1 - dice_coe_1(y_true[..., 0], y_pred[..., 0])) +
-            w_lung *
-            (1 - dice_coe_1(y_true[..., 2] + y_true[..., 3], y_pred[..., 2])))
-
-    return 10 * tf.reduce_mean(
-        tf.where(
-            tf.squeeze(plc_status) >= 0.5,
-            x=loss + w_gtvl * tf.reduce_sum(binary_focal_loss(
-                y_true[..., 1], y_pred[..., 1], pos_weight=pos_weight) * mask,
-                                            axis=(1, 2)) / n_elems,
-            y=loss + w_gtvl * tf.reduce_mean(
-                binary_focal_loss(tf.zeros(tf.shape(y_pred[..., 1])),
-                                  y_pred[..., 1],
-                                  pos_weight=pos_weight),
-                axis=(1, 2)))) / (w_lung + w_gtvl + w_gtvt)
+    return (w_gtvt *
+            (1 - dice_coe_1(y_true[..., 0], y_pred[..., 0])) + w_lung *
+            (1 - dice_coe_1(y_true[..., 2] + y_true[..., 3], y_pred[..., 2])) +
+            w_gtvl * gtvl_loss(
+                y_true,
+                y_pred,
+                plc_status,
+                sick_lung_axis,
+                pos_weight=pos_weight,
+                scaling=s_gtvl,
+            )) / (w_gtvl + w_gtvt + w_lung)
 
 
 loss_tracker = tf.keras.metrics.Mean(name="loss")
+gtvl_loss_tracker = tf.keras.metrics.Mean(name="loss")
 gtvt_dice_tracker = tf.keras.metrics.Mean(name="gtvt_dice")
 lung_dice_tracker = tf.keras.metrics.Mean(name="lung_dice")
 
 val_loss_tracker = tf.keras.metrics.Mean(name="val_loss")
+val_gtvl_loss_tracker = tf.keras.metrics.Mean(name="loss")
+gtvt_dice_tracker = tf.keras.metrics.Mean(name="gtvt_dice")
 val_gtvt_dice_tracker = tf.keras.metrics.Mean(name="val_gtvt_dice")
 val_lung_dice_tracker = tf.keras.metrics.Mean(name="val_lung_dice")
 
@@ -146,6 +163,7 @@ class CustomModel(tf.keras.Model):
         w_lung=1.0,
         w_gtvt=1.0,
         w_gtvl=4.0,
+        s_gtvl=4.0,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
@@ -153,6 +171,7 @@ class CustomModel(tf.keras.Model):
         self.w_lung = w_lung
         self.w_gtvt = w_gtvt
         self.w_gtvl = w_gtvl
+        self.s_gtvl = s_gtvl
 
     def train_step(self, data):
         x, y, plc_status, sick_lung_axis = data
@@ -169,6 +188,7 @@ class CustomModel(tf.keras.Model):
                 w_lung=self.w_lung,
                 w_gtvt=self.w_gtvt,
                 w_gtvl=self.w_gtvl,
+                s_gtvl=self.s_gtvl,
             )
 
         # Compute gradients
@@ -179,6 +199,13 @@ class CustomModel(tf.keras.Model):
         self.optimizer.apply_gradients(zip(gradients, trainable_vars))
 
         loss_tracker.update_state(loss)
+        gtvl_loss_tracker.update_state(
+            gtvl_loss(y,
+                      y_pred,
+                      plc_status,
+                      sick_lung_axis,
+                      pos_weight=self.alpha,
+                      scaling=self.s_gtvl))
         gtvt_dice_tracker.update_state(
             tf.reduce_mean(dice_coe_1_hard(y[..., 0], y_pred[..., 0])))
         lung_dice_tracker.update_state(
@@ -186,6 +213,7 @@ class CustomModel(tf.keras.Model):
                 dice_coe_1_hard(y[..., 2] + y[..., 3], y_pred[..., 2])))
         return {
             "loss": loss_tracker.result(),
+            "gtvl_loss": gtvl_loss_tracker.result(),
             "dice_gtvt": gtvt_dice_tracker.result(),
             "dice_lung": lung_dice_tracker.result()
         }
@@ -197,14 +225,33 @@ class CustomModel(tf.keras.Model):
         y_pred = self(x, training=False)
 
         val_loss_tracker.update_state(
-            custom_loss(y, y_pred, plc_status, sick_lung_axis))
+            custom_loss(
+                y,
+                y_pred,
+                plc_status,
+                sick_lung_axis,
+                pos_weight=self.alpha,
+                w_lung=self.w_lung,
+                w_gtvt=self.w_gtvt,
+                w_gtvl=self.w_gtvl,
+                s_gtvl=self.s_gtvl,
+            ))
+        val_gtvl_loss_tracker.update_state(
+            gtvl_loss(
+                y,
+                y_pred,
+                plc_status,
+                sick_lung_axis,
+                pos_weight=self.alpha,
+                scaling=self.s_gtvl,
+            ))
         val_gtvt_dice_tracker.update_state(
-            tf.reduce_mean(dice_coe_1_hard(y[..., 0], y_pred[..., 0])))
+            dice_coe_1_hard(y[..., 0], y_pred[..., 0]))
         val_lung_dice_tracker.update_state(
-            tf.reduce_mean(
-                dice_coe_1_hard(y[..., 2] + y[..., 3], y_pred[..., 2])))
+            dice_coe_1_hard(y[..., 2] + y[..., 3], y_pred[..., 2]))
         return {
-            "loss_val": val_loss_tracker.result(),
+            "loss": val_loss_tracker.result(),
+            "gtvl_loss": val_gtvl_loss_tracker.result(),
             "dice_gtvt": val_gtvt_dice_tracker.result(),
             "dice_lung": val_lung_dice_tracker.result()
         }
@@ -217,6 +264,7 @@ class CustomModel(tf.keras.Model):
         # If you don't implement this property, you have to call
         # `reset_states()` yourself at the time of your choosing.
         return [
-            loss_tracker, gtvt_dice_tracker, lung_dice_tracker,
-            val_loss_tracker, val_gtvt_dice_tracker, val_lung_dice_tracker
+            loss_tracker, gtvl_loss_tracker, gtvt_dice_tracker,
+            lung_dice_tracker, val_loss_tracker, val_gtvl_loss_tracker,
+            val_gtvt_dice_tracker, val_lung_dice_tracker
         ]
