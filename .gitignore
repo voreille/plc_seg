@@ -98,3 +98,5 @@ models/model_jnm/log_reg_withoutglm_without_penalty.pkl
 *.pkl
 
 models/
+
+logs/

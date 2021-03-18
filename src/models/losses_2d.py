@@ -2,6 +2,49 @@ import tensorflow as tf
 import tensorflow.keras.backend as K
 
 
+def gtvl_loss(y_true, y_pred, scaling=1.0, pos_weight=1.0):
+    n_elems = tf.reduce_sum(y_true[..., 3], axis=(1, 2))
+    return scaling * tf.reduce_sum(
+        binary_focal_loss(
+            y_true[..., 1], y_pred[..., 1], pos_weight=pos_weight) *
+        y_true[..., 3],
+        axis=(1, 2),
+    ) / n_elems
+
+
+class CustomLoss(tf.keras.losses.Loss):
+    def __init__(self,
+                 pos_weight=1.0,
+                 w_lung=1,
+                 w_gtvt=1,
+                 w_gtvl=4,
+                 s_gtvl=10,
+                 name="custom_loss"):
+        super().__init__(name=name)
+        self.pos_weight = pos_weight
+        self.w_lung = w_lung
+        self.w_gtvt = w_gtvt
+        self.w_gtvl = w_gtvl
+        self.s_gtvl = s_gtvl
+
+    def _gtvl_loss(self, y_true, y_pred):
+        n_elems = tf.reduce_sum(y_true[..., 3], axis=(1, 2))
+        return self.s_gtvl * tf.reduce_sum(
+            binary_focal_loss(
+                y_true[..., 1], y_pred[..., 1], pos_weight=self.pos_weight) *
+            y_true[..., 3],
+            axis=(1, 2),
+        ) / n_elems
+
+    def call(self, y_true, y_pred):
+        return (self.w_gtvt *
+                (1 - dice_coe_1(y_true[..., 0], y_pred[..., 0])) +
+                self.w_lung *
+                (1 - dice_coe_1(y_true[..., 2], y_pred[..., 2])) +
+                self.w_gtvl * self._gtvl_loss(y_true, y_pred)) / (
+                    self.w_gtvl + self.w_gtvt + self.w_lung)
+
+
 def masked_focal_loss(y_true, y_pred, mask, gamma=2):
     n_pos = tf.reduce_sum(y_true)
     return -tf.reduce_sum(y_true * tf.math.log(y_pred) *

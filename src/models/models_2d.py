@@ -81,14 +81,6 @@ def unet_model(output_channels, input_shape=(256, 256, 3)):
     return tf.keras.Model(inputs=inputs, outputs=x)
 
 
-def get_mask(y_true, sick_lung_axis):
-    if sick_lung_axis == 9:
-        return tf.ones(y_true[..., 3].shape)
-    else:
-        return 1 - (y_true[..., sick_lung_axis] - y_true[..., 1] -
-                    y_true[..., 0])
-
-
 def gtvl_loss(
     y_true,
     y_pred,
@@ -143,18 +135,6 @@ def custom_loss(
             )) / (w_gtvl + w_gtvt + w_lung)
 
 
-loss_tracker = tf.keras.metrics.Mean(name="loss")
-gtvl_loss_tracker = tf.keras.metrics.Mean(name="loss")
-gtvt_dice_tracker = tf.keras.metrics.Mean(name="gtvt_dice")
-lung_dice_tracker = tf.keras.metrics.Mean(name="lung_dice")
-
-val_loss_tracker = tf.keras.metrics.Mean(name="val_loss")
-val_gtvl_loss_tracker = tf.keras.metrics.Mean(name="loss")
-gtvt_dice_tracker = tf.keras.metrics.Mean(name="gtvt_dice")
-val_gtvt_dice_tracker = tf.keras.metrics.Mean(name="val_gtvt_dice")
-val_lung_dice_tracker = tf.keras.metrics.Mean(name="val_lung_dice")
-
-
 class CustomModel(tf.keras.Model):
     def __init__(
         self,
@@ -164,6 +144,8 @@ class CustomModel(tf.keras.Model):
         w_gtvt=1.0,
         w_gtvl=4.0,
         s_gtvl=4.0,
+        train_writer=None,
+        test_writer=None,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
@@ -172,6 +154,20 @@ class CustomModel(tf.keras.Model):
         self.w_gtvt = w_gtvt
         self.w_gtvl = w_gtvl
         self.s_gtvl = s_gtvl
+        self.train_writer = train_writer
+        self.test_writer = test_writer
+
+        self.loss_tracker = tf.keras.metrics.Mean(name="loss")
+        self.gtvl_loss_tracker = tf.keras.metrics.Mean(name="gtvl_loss")
+        self.gtvt_dice_tracker = tf.keras.metrics.Mean(name="gtvt_dice")
+        self.lung_dice_tracker = tf.keras.metrics.Mean(name="lung_dice")
+
+        self.val_loss_tracker = tf.keras.metrics.Mean(name="val_loss")
+        self.val_gtvl_loss_tracker = tf.keras.metrics.Mean(name="gtvl_loss")
+        self.val_gtvt_dice_tracker = tf.keras.metrics.Mean(
+            name="val_gtvt_dice")
+        self.val_lung_dice_tracker = tf.keras.metrics.Mean(
+            name="val_lung_dice")
 
     def train_step(self, data):
         x, y, plc_status, sick_lung_axis = data
@@ -198,24 +194,32 @@ class CustomModel(tf.keras.Model):
         # Update weights
         self.optimizer.apply_gradients(zip(gradients, trainable_vars))
 
-        loss_tracker.update_state(loss)
-        gtvl_loss_tracker.update_state(
+        self.loss_tracker.update_state(loss)
+        self.gtvl_loss_tracker.update_state(
             gtvl_loss(y,
                       y_pred,
                       plc_status,
                       sick_lung_axis,
                       pos_weight=self.alpha,
                       scaling=self.s_gtvl))
-        gtvt_dice_tracker.update_state(
+        self.gtvt_dice_tracker.update_state(
             tf.reduce_mean(dice_coe_1_hard(y[..., 0], y_pred[..., 0])))
-        lung_dice_tracker.update_state(
+        self.lung_dice_tracker.update_state(
             tf.reduce_mean(
                 dice_coe_1_hard(y[..., 2] + y[..., 3], y_pred[..., 2])))
+
+        if self.train_writer:
+            with self.train_writer.as_default():
+                tf.summary.scalar(
+                    'loss',
+                    self.loss_tracker.result(),
+                )
+
         return {
-            "loss": loss_tracker.result(),
-            "gtvl_loss": gtvl_loss_tracker.result(),
-            "dice_gtvt": gtvt_dice_tracker.result(),
-            "dice_lung": lung_dice_tracker.result()
+            "loss": self.loss_tracker.result(),
+            "gtvl_loss": self.gtvl_loss_tracker.result(),
+            "dice_gtvt": self.gtvt_dice_tracker.result(),
+            "dice_lung": self.lung_dice_tracker.result()
         }
 
     def test_step(self, data):
@@ -224,7 +228,7 @@ class CustomModel(tf.keras.Model):
         # Compute predictions
         y_pred = self(x, training=False)
 
-        val_loss_tracker.update_state(
+        self.val_loss_tracker.update_state(
             custom_loss(
                 y,
                 y_pred,
@@ -236,7 +240,7 @@ class CustomModel(tf.keras.Model):
                 w_gtvl=self.w_gtvl,
                 s_gtvl=self.s_gtvl,
             ))
-        val_gtvl_loss_tracker.update_state(
+        self.val_gtvl_loss_tracker.update_state(
             gtvl_loss(
                 y,
                 y_pred,
@@ -245,15 +249,23 @@ class CustomModel(tf.keras.Model):
                 pos_weight=self.alpha,
                 scaling=self.s_gtvl,
             ))
-        val_gtvt_dice_tracker.update_state(
+        self.val_gtvt_dice_tracker.update_state(
             dice_coe_1_hard(y[..., 0], y_pred[..., 0]))
-        val_lung_dice_tracker.update_state(
+        self.val_lung_dice_tracker.update_state(
             dice_coe_1_hard(y[..., 2] + y[..., 3], y_pred[..., 2]))
+
+        if self.test_writer:
+            with self.test_writer.as_default():
+                tf.summary.scalar(
+                    'val_loss',
+                    self.val_loss_tracker.result(),
+                )
+
         return {
-            "loss": val_loss_tracker.result(),
-            "gtvl_loss": val_gtvl_loss_tracker.result(),
-            "dice_gtvt": val_gtvt_dice_tracker.result(),
-            "dice_lung": val_lung_dice_tracker.result()
+            "loss": self.val_loss_tracker.result(),
+            "gtvl_loss": self.val_gtvl_loss_tracker.result(),
+            "dice_gtvt": self.val_gtvt_dice_tracker.result(),
+            "dice_lung": self.val_lung_dice_tracker.result()
         }
 
     @property
@@ -264,7 +276,26 @@ class CustomModel(tf.keras.Model):
         # If you don't implement this property, you have to call
         # `reset_states()` yourself at the time of your choosing.
         return [
-            loss_tracker, gtvl_loss_tracker, gtvt_dice_tracker,
-            lung_dice_tracker, val_loss_tracker, val_gtvl_loss_tracker,
-            val_gtvt_dice_tracker, val_lung_dice_tracker
+            self.loss_tracker,
+            self.gtvl_loss_tracker,
+            self.gtvt_dice_tracker,
+            self.lung_dice_tracker,
+            self.val_loss_tracker,
+            self.val_gtvl_loss_tracker,
+            self.val_gtvt_dice_tracker,
+            self.val_lung_dice_tracker,
         ]
+
+
+class IdentityLayer(tf.keras.layers.Layer):
+    def call(self, inputs):
+        return inputs
+
+
+def simple_model(output_channels, image_shape):
+    inputs = tf.keras.layers.Input(image_shape)
+
+    outputs = IdentityLayer()(inputs)
+
+    model = tf.keras.Model(inputs=[inputs], outputs=[outputs])
+    return model

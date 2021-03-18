@@ -21,18 +21,18 @@ def unravel_mask(mask):
                     axis=-1).astype(np.float32)
 
 
-def get_tf_data(
-    file,
-    clinical_df,
-    output_shape=(256, 256),
-    random_slice=True,
-    centered_on_gtvt=False,
-    random_shift=None,
-    n_repeat=None,
-    num_parallel_calls=None,
-    oversample_plc_neg=False,
-    patient_list=None,
-):
+def get_tf_data(file,
+                clinical_df,
+                output_shape=(256, 256),
+                random_slice=True,
+                centered_on_gtvt=False,
+                random_shift=None,
+                n_repeat=None,
+                num_parallel_calls=None,
+                oversample_plc_neg=False,
+                patient_list=None,
+                return_plc_status=False,
+                return_complete_gtvl=False):
     """mask: mask_gtvt, mask_gtvl, mask_lung1, mask_lung2
 
     Args:
@@ -57,7 +57,8 @@ def get_tf_data(
             if clinical_df.loc[int(p.split('_')[1]), "plc_status"] == 1
         ]
         shuffle(patient_list_plc_neg)
-        diff_patient = len(patient_list_plc_pos) - len(patient_list_plc_neg) * 2
+        diff_patient = len(
+            patient_list_plc_pos) - len(patient_list_plc_neg) * 2
         # patient_list = patient_list_plc_neg
         patient_list.extend(patient_list_plc_neg)
         patient_list.extend(patient_list_plc_neg[:diff_patient])
@@ -95,30 +96,61 @@ def get_tf_data(
             ])
 
         r = [output_shape[i] // 2 for i in range(2)]
+        mask = mask[center[0] - r[0]:center[0] + r[0],
+                    center[1] - r[1]:center[1] + r[1], s, :]
+        if plc_status == 1:
+            gt_gtvl = mask[..., 1]
+            mask_loss = (1 - mask[..., sick_lung_axis] + mask[..., 0] +
+                         mask[..., 1])
+        else:
+            gt_gtvl = np.zeros(mask[..., 1].shape)
+            mask_loss = np.ones_like(gt_gtvl)
+        mask_loss[mask_loss > 0] = 1
+        mask_loss[mask_loss <= 0] = 0
+        if return_complete_gtvl:
+            mask = np.stack(
+                [
+                    mask[..., 0], gt_gtvl, mask[..., 2] + mask[..., 3],
+                    mask_loss, mask[..., 1]
+                ],
+                axis=-1,
+            )
+        else:
+            mask = np.stack(
+                [
+                    mask[..., 0], gt_gtvl, mask[..., 2] + mask[..., 3],
+                    mask_loss
+                ],
+                axis=-1,
+            )
         return image[center[0] - r[0]:center[0] + r[0],
                      center[1] - r[1]:center[1] + r[1],
-                     s, :], mask[center[0] - r[0]:center[0] + r[0],
-                                 center[1] - r[1]:center[1] + r[1],
-                                 s, :], np.array([plc_status]), np.array(
-                                     [sick_lung_axis], dtype=np.int8)
+                     s, :], mask, np.array([plc_status])
 
     def tf_f(patient):
-        [image, mask, plc_status, sick_lung_axis
-         ] = tf.py_function(f, [patient],
-                            [tf.float32, tf.float32, tf.float32, tf.int8])
+        [image, mask,
+         plc_status] = tf.py_function(f, [patient],
+                                      [tf.float32, tf.float32, tf.float32])
         image.set_shape(output_shape + (3, ))
-        mask.set_shape(output_shape + (4, ))
+        if return_complete_gtvl:
+            mask.set_shape(output_shape + (5, ))
+        else:
+            mask.set_shape(output_shape + (4, ))
         plc_status.set_shape((1, ))
-        sick_lung_axis.set_shape((1, ))
-        return image, mask, plc_status, sick_lung_axis
+        return image, mask, plc_status
 
     if num_parallel_calls is not None:
         if num_parallel_calls == 'auto':
             num_parallel_calls = tf.data.experimental.AUTOTUNE
 
-        return patient_ds.map(
+        out_ds = patient_ds.map(
             tf_f,
             num_parallel_calls=num_parallel_calls,
         )
     else:
-        return patient_ds.map(tf_f)
+        out_ds = patient_ds.map(tf_f)
+
+    if not return_complete_gtvl:
+        out_ds = out_ds.map(lambda x, y, p: (x, y))
+
+    return out_ds
