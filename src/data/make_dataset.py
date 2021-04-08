@@ -22,12 +22,15 @@ path_mask_lung_nii = Path(
     "/home/val/python_wkspce/plc_seg/data/interim/nii_resampled")
 path_clinical_info = Path(os.environ["CLINIC_INFO_PATH"])
 
-path_output = project_dir / "data/processed/2d_pet_normalized"
+path_output = project_dir / "data/processed/2d_pet_clipped"
 
 path_output.mkdir(parents=True, exist_ok=True)
 
 image_size = (224, 224)
 n_epochs = 1000
+
+suv_high = 2.5
+suv_low = 0
 
 
 def to_np(x):
@@ -129,7 +132,11 @@ def parse_image(
     ct[ct < hu_low] = hu_low
     ct = (2 * ct - hu_high - hu_low) / (hu_high - hu_low)
 
-    pt = normalize_image(pt)
+    pt[pt > suv_high] = suv_high
+    pt[pt < suv_low] = suv_low
+    pt = (2 * pt - suv_high - suv_low) / (suv_high - suv_low)
+
+    # pt = normalize_image(pt)
 
     bb_gtvt = get_bb_mask_voxel(mask_gtvt)
     bb_gtvl = get_bb_mask_voxel(mask_gtvl)

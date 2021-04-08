@@ -1,6 +1,8 @@
 import tensorflow as tf
 import tensorflow.keras.backend as K
 
+from src.models.focal_loss import binary_focal_loss
+
 
 def gtvl_loss(y_true, y_pred, scaling=1.0, pos_weight=1.0):
     n_elems = tf.reduce_sum(y_true[..., 3], axis=(1, 2))
@@ -118,20 +120,6 @@ def focal_loss_fix(y_true, y_pred, gamma=2):
                           (1 - y_pred)**gamma) / bs / n_pos
 
 
-def binary_focal_loss(y_true, y_pred, gamma=2):
-    alpha = 1 / K.sum(y_true, axis=(1, 2, 3, 4))
-    y_true = tf.cast(y_true, tf.float32)
-    # Define epsilon so that the back-propagation will not result in NaN for 0 divisor case
-    epsilon = K.epsilon()
-    # Add the epsilon to prediction value
-    # y_pred = y_pred + epsilon
-    # Clip the prediciton value
-    y_pred = K.clip(y_pred, epsilon, 1.0 - epsilon)
-    # Calculate p_t
-    loss = (y_true * (-alpha) * (1 - y_pred)**gamma * K.log(y_pred))
-    return K.mean(K.sum(loss, axis=(1, 2, 3, 4)))
-
-
 def binary_focal_loss_custom(y_true, y_pred, gamma=2):
     alpha = 1 / K.sum(y_true, axis=(1, 2, 3, 4))
     beta = 1 / K.sum(tf.cast(tf.equal(y_true, 0.0), dtype=tf.float32),
@@ -151,7 +139,7 @@ def binary_focal_loss_custom(y_true, y_pred, gamma=2):
 
 def binary_focal_loss_fixed(y_true, y_pred, alpha=1, gamma=2):
     y_true = tf.cast(y_true, tf.float32)
-    # Define epsilon so that the back-propagation will not result in NaN for 0 divisor case
+    # Define epsilon so that the back-propagation will not result in NaN for 0 
     epsilon = K.epsilon()
     # Add the epsilon to prediction value
     # y_pred = y_pred + epsilon

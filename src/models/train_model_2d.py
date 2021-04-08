@@ -1,12 +1,14 @@
 import os
 from pathlib import Path
 from random import shuffle
+import random
 import datetime
 
 import dotenv
 import tensorflow as tf
 import h5py
 import pandas as pd
+from numpy.random import seed
 
 from src.models.losses_2d import CustomLoss, gtvl_loss
 from src.models.fetch_data_from_hdf5 import get_tf_data
@@ -17,22 +19,48 @@ dotenv_path = project_dir / ".env"
 dotenv.load_dotenv(str(dotenv_path))
 log_dir = project_dir / ("logs/fit/" +
                          datetime.datetime.now().strftime("%Y%m%d-%H%M%S"))
-path_model = project_dir / "models/clean_model/model1"
+path_model = project_dir / "models/clean_model/model_gtvl_gtvt"
 
 path_data_nii = Path(os.environ["NII_PATH"])
 path_mask_lung_nii = Path(os.environ["NII_LUNG_PATH"])
 path_clinical_info = Path(os.environ["CLINIC_INFO_PATH"])
 
 bs = 4
-n_epochs = 200
+n_epochs = 10
 n_prefetch = 20
 image_size = (256, 256)
 
-alpha = 0.75
-w_gtvl = 1
-s_gtvl = 1
-w_gtvt = 0
-w_lung = 0
+os.environ['PYTHONHASHSEED'] = '0'
+random.seed(12345)
+seed(1)
+tf.random.set_seed(2)
+
+
+def model_builder(
+    lr=1e-3,
+    alpha=0.5,
+    s_gtvl=40.0,
+    w_gtvl=1.0,
+    w_gtvt=0.0,
+    w_lung=0.0,
+):
+    model = unet_model(3, input_shape=image_size + (3, ))
+
+    def gtvl_metric(y_true, y_pred):
+        return gtvl_loss(y_true, y_pred, scaling=s_gtvl, pos_weight=alpha)
+
+    model.compile(
+        optimizer=tf.keras.optimizers.Adam(learning_rate=lr),
+        loss=CustomLoss(pos_weight=alpha,
+                        w_lung=w_lung,
+                        w_gtvt=w_gtvt,
+                        w_gtvl=w_gtvl,
+                        s_gtvl=s_gtvl),
+        metrics=[gtvl_metric],
+        run_eagerly=False,
+    )
+
+    return model
 
 
 def get_trainval_patient_list(df, patient_list):
@@ -71,7 +99,7 @@ def main():
         clinical_df,
         output_shape=(256, 256),
         random_slice=False,
-        centered_on_gtvt=True,
+        label_to_center="GTV T",
         patient_list=patient_list_val,
     ).cache().batch(2)
     data_train = get_tf_data(file_train,
@@ -84,10 +112,6 @@ def main():
                              oversample_plc_neg=True,
                              patient_list=patient_list_train).batch(bs)
 
-    model = unet_model(3, input_shape=image_size + (3, ))
-
-    optimizer = tf.keras.optimizers.Adam(learning_rate=1e-3)
-
     tensorboard_callback = tf.keras.callbacks.TensorBoard(log_dir=log_dir,
                                                           histogram_freq=1)
 
@@ -96,28 +120,18 @@ def main():
         min_delta=0,
         patience=5,
         verbose=0,
-        mode='auto',
+        mode='min',
         restore_best_weights=True)
-
-    def gtvl_metrics(y_true, y_pred):
-        return gtvl_loss(y_true, y_pred, scaling=s_gtvl, pos_weight=alpha)
-
-    model.compile(
-        loss=CustomLoss(pos_weight=alpha,
-                        w_lung=w_lung,
-                        w_gtvt=w_gtvt,
-                        w_gtvl=w_gtvl,
-                        s_gtvl=s_gtvl),
-        metrics=[gtvl_metrics],
-        optimizer=optimizer,
-        run_eagerly=False,
-    )
-
+    model = model_builder(alpha=0.5,
+                          s_gtvl=40.0,
+                          w_gtvl=1.0,
+                          w_gtvt=1.0,
+                          w_lung=0.0)
     model.fit(
         x=data_train,
         epochs=n_epochs,
         validation_data=data_val,
-        callbacks=[early_stop_callback, tensorboard_callback],
+        # callbacks=[early_stop_callback, tensorboard_callback],
     )
 
     model.save(path_model)

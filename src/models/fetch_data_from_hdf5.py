@@ -25,14 +25,15 @@ def get_tf_data(file,
                 clinical_df,
                 output_shape=(256, 256),
                 random_slice=True,
-                centered_on_gtvt=False,
+                label_to_center="GTV T",
                 random_shift=None,
                 n_repeat=None,
                 num_parallel_calls=None,
                 oversample_plc_neg=False,
                 patient_list=None,
                 return_plc_status=False,
-                return_complete_gtvl=False):
+                return_complete_gtvl=False,
+                return_patient=False):
     """mask: mask_gtvt, mask_gtvl, mask_lung1, mask_lung2
 
     Args:
@@ -82,13 +83,15 @@ def get_tf_data(file,
         bb_gtvl = get_bb_mask_voxel(mask[..., 1])
         bb_gtvt = get_bb_mask_voxel(mask[..., 0])
         if random_slice:
-            s = randint(bb_gtvl[2], bb_gtvl[5])
-        elif random_slice and plc_status == 0:
-            s = randint(bb_gtvt[2], bb_gtvt[5])
-        elif centered_on_gtvt:
-            s = (bb_gtvt[5] + bb_gtvt[2]) // 2
+            # if random_slice and plc_status == 1:
+            s = randint(n_slices)
+        # elif random_slice and plc_status == 0:
+        #     s = randint(bb_gtvt[2], bb_gtvt[5])
         else:
-            s = (bb_gtvl[5] + bb_gtvl[2]) // 2
+            if label_to_center == "GTV T":
+                s = (bb_gtvt[5] + bb_gtvt[2]) // 2
+            else:
+                s = (bb_gtvl[5] + bb_gtvl[2]) // 2
         if random_shift:
             center += np.array([
                 randint(-random_shift, random_shift),
@@ -144,13 +147,18 @@ def get_tf_data(file,
             num_parallel_calls = tf.data.experimental.AUTOTUNE
 
         out_ds = patient_ds.map(
-            tf_f,
+            lambda patient: (*tf_f(patient), patient),
             num_parallel_calls=num_parallel_calls,
         )
     else:
-        out_ds = patient_ds.map(tf_f)
+        out_ds = patient_ds.map(lambda patient: (*tf_f(patient), patient))
 
-    if not return_complete_gtvl:
-        out_ds = out_ds.map(lambda x, y, p: (x, y))
+    if return_plc_status is False and return_patient is False:
+        out_ds = out_ds.map(lambda x, y, plc_status, patient: (x, y))
+    elif return_plc_status is False and return_patient is True:
+        out_ds = out_ds.map(lambda x, y, plc_status, patient: (x, y, patient))
+    elif return_plc_status is True and return_patient is False:
+        out_ds = out_ds.map(lambda x, y, plc_status, patient:
+                            (x, y, plc_status))
 
     return out_ds
