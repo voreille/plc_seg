@@ -10,23 +10,38 @@ import h5py
 import pandas as pd
 from numpy.random import seed
 
-from src.models.losses_2d import CustomLoss, gtvl_loss
+from src.models.losses_2d import CustomLoss, gtvl_loss, dice_coe_1_hard
 from src.models.fetch_data_from_hdf5 import get_tf_data
-from src.models.models_2d import unet_model
+from src.models.models_2d import unet_model, Unet, UnetIantsen
+from src.models.model_evaluation import compute_plc_volume, compute_results
+from src.models.utils import plot_fig
 
 project_dir = Path(__file__).resolve().parents[2]
 dotenv_path = project_dir / ".env"
 dotenv.load_dotenv(str(dotenv_path))
 log_dir = project_dir / ("logs/fit/" +
                          datetime.datetime.now().strftime("%Y%m%d-%H%M%S"))
-path_model = project_dir / "models/clean_model/model_gtvl_gtvt"
+
+split_path = project_dir / "data/split.csv"
+
+# model_pretrained = "model_seg_gtvt_iantsen"
+model_pretrained = "model_seg_gtvt_iantsen"
+model = "model_iantsen_gtvl_pretrained_on_gtvt_lung"
+# model = "model_seg_gtvt_iantsen"
+path_model_pretrained = project_dir / f"models/clean_model/{model_pretrained}"
+path_model = project_dir / f"models/clean_model/{model}"
+
+output_directory = project_dir / "data/plc_volume"
+output_directory.mkdir(parents=True, exist_ok=True)
+path_pred_volume = output_directory / f"{model}.csv"
 
 path_data_nii = Path(os.environ["NII_PATH"])
 path_mask_lung_nii = Path(os.environ["NII_LUNG_PATH"])
 path_clinical_info = Path(os.environ["CLINIC_INFO_PATH"])
+path_mean_sd = "/home/val/python_wkspce/plc_seg/data/mean_std.csv"
 
 bs = 4
-n_epochs = 10
+n_epochs = 100
 n_prefetch = 20
 image_size = (256, 256)
 
@@ -35,107 +50,197 @@ random.seed(12345)
 seed(1)
 tf.random.set_seed(2)
 
+IMAGE_SHAPE = (256, 256, 3)
+PRETRAIN = True
+
 
 def model_builder(
     lr=1e-3,
     alpha=0.5,
-    s_gtvl=40.0,
     w_gtvl=1.0,
     w_gtvt=0.0,
     w_lung=0.0,
+    model=None,
+    model_str="mobilenet",
+    run_eagerly=False,
 ):
-    model = unet_model(3, input_shape=image_size + (3, ))
+    model_dict = {
+        "iantsen": UnetIantsen,
+        "mobilenet": Unet,
+    }
+
+    if model is None:
+        model = model_dict[model_str](3, input_shape=IMAGE_SHAPE)
+    else:
+        if isinstance(model, Path):
+            model = tf.keras.models.load_model(model, compile=False)
+        for i in range(len(model.up_stack)):
+            model.up_stack[i].trainable = False
+        for i in range(len(model.down_stack)):
+            model.down_stack[i].trainable = False
 
     def gtvl_metric(y_true, y_pred):
-        return gtvl_loss(y_true, y_pred, scaling=s_gtvl, pos_weight=alpha)
+        return gtvl_loss(y_true, y_pred, pos_weight=alpha)
+
+    def dice_gtvt(y_true, y_pred):
+        return dice_coe_1_hard(y_true[..., 0], y_pred[..., 0])
+
+    def dice_lung(y_true, y_pred):
+        return dice_coe_1_hard(y_true[..., 2], y_pred[..., 2])
 
     model.compile(
         optimizer=tf.keras.optimizers.Adam(learning_rate=lr),
-        loss=CustomLoss(pos_weight=alpha,
-                        w_lung=w_lung,
-                        w_gtvt=w_gtvt,
-                        w_gtvl=w_gtvl,
-                        s_gtvl=s_gtvl),
-        metrics=[gtvl_metric],
-        run_eagerly=False,
+        loss=CustomLoss(
+            pos_weight=alpha,
+            w_lung=w_lung,
+            w_gtvt=w_gtvt,
+            w_gtvl=w_gtvl,
+        ),
+        metrics=[gtvl_metric, dice_gtvt, dice_lung],
+        run_eagerly=run_eagerly,
     )
 
     return model
 
 
-def get_trainval_patient_list(df, patient_list):
-    id_list = [int(p.split('_')[1]) for p in patient_list]
-    df = df.loc[id_list, :]
-    id_patient_plc_neg_training = list(df[(df["is_chuv"] == 1)
-                                          & (df["plc_status"] == 0)].index)
-    id_patient_plc_pos_training = list(df[(df["is_chuv"] == 1)
-                                          & (df["plc_status"] == 1)].index)
-    shuffle(id_patient_plc_neg_training)
-    shuffle(id_patient_plc_pos_training)
-    id_patient_plc_neg_val = id_patient_plc_neg_training[:2]
-    id_patient_plc_pos_val = id_patient_plc_pos_training[:4]
-    id_val = id_patient_plc_neg_val + id_patient_plc_pos_val
-    id_patient_plc_neg_train = id_patient_plc_neg_training[2:]
-    id_patient_plc_pos_train = id_patient_plc_pos_training[4:]
-    id_train = id_patient_plc_neg_train + id_patient_plc_pos_train
+def get_trainval_patient_list(df_path):
+    df = pd.read_csv(df_path).set_index("patient_id")
+    id_train = df[df["train_val_test"] == 0].index
+    id_val = df[df["train_val_test"] == 1].index
+    id_test = df[df["train_val_test"] == 2].index
 
+    patient_list_test = [f"PatientLC_{i}" for i in id_test]
     patient_list_val = [f"PatientLC_{i}" for i in id_val]
     patient_list_train = [f"PatientLC_{i}" for i in id_train]
-    return patient_list_train, patient_list_val
+
+    return patient_list_train, patient_list_val, patient_list_test, df
+
+
+class CustomEarlyStopping(tf.keras.callbacks.EarlyStopping):
+    def __init__(self, *args, min_epochs=0, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.min_epochs = min_epochs
+
+    def on_epoch_end(self, epoch, logs=None):
+        if epoch < self.min_epochs:
+            return
+        else:
+            super().on_epoch_end(epoch, logs=logs)
 
 
 def main():
-    file_train = h5py.File(
-        "/home/val/python_wkspce/plc_seg/data/processed/2d_pet_normalized/train.hdf5",
+    h5_file = h5py.File(
+        "/home/val/python_wkspce/plc_seg/data/processed/hdf5_2d/dataset.hdf5",
         "r")
-    clinical_df = pd.read_csv(path_clinical_info).set_index("patient_id")
-    patient_list = list(file_train.keys())
-    patient_list = [p for p in patient_list if p not in ["PatientLC_63"]]
-    patient_list_train, patient_list_val = get_trainval_patient_list(
-        clinical_df, patient_list)
-
-    data_val = get_tf_data(
-        file_train,
-        clinical_df,
-        output_shape=(256, 256),
-        random_slice=False,
-        label_to_center="GTV T",
-        patient_list=patient_list_val,
-    ).cache().batch(2)
-    data_train = get_tf_data(file_train,
-                             clinical_df,
-                             output_shape=(256, 256),
-                             random_slice=True,
-                             random_shift=20,
-                             n_repeat=10,
-                             num_parallel_calls='auto',
-                             oversample_plc_neg=True,
-                             patient_list=patient_list_train).batch(bs)
+    (patient_list_train, patient_list_val, patient_list_test,
+     clinical_df) = get_trainval_patient_list(split_path)
+    mean_sd_df = pd.read_csv(path_mean_sd).set_index("patient_id")
+    clinical_df = pd.concat([clinical_df, mean_sd_df], axis=1)
 
     tensorboard_callback = tf.keras.callbacks.TensorBoard(log_dir=log_dir,
                                                           histogram_freq=1)
 
-    early_stop_callback = tf.keras.callbacks.EarlyStopping(
-        monitor='val_loss',
+    if PRETRAIN:
+        data_train = get_tf_data(h5_file,
+                                 clinical_df,
+                                 output_shape_image=IMAGE_SHAPE,
+                                 random_slice=True,
+                                 label_to_contain="GTV T",
+                                 random_shift=0,
+                                 n_repeat=10,
+                                 num_parallel_calls='auto',
+                                 oversample_plc_neg=True,
+                                 patient_list=patient_list_train).batch(bs)
+        data_val = get_tf_data(
+            h5_file,
+            clinical_df,
+            output_shape_image=IMAGE_SHAPE,
+            random_slice=False,
+            label_to_contain="GTV T",
+            patient_list=patient_list_val,
+        ).cache().batch(2)
+
+        early_stop_callback = CustomEarlyStopping(
+            min_epochs=0,
+            monitor='val_dice_gtvt',
+            # monitor='val_gtvl_metric',
+            min_delta=0,
+            patience=5,
+            verbose=0,
+            mode='max',
+            restore_best_weights=True)
+        model = model_builder(
+            alpha=0.75,
+            w_gtvl=0.0,
+            w_gtvt=1.0,
+            w_lung=1.0,
+        )
+        model.fit(
+            x=data_train,
+            epochs=n_epochs,
+            validation_data=data_val,
+            callbacks=[early_stop_callback, tensorboard_callback],
+        )
+
+        model.save(path_model_pretrained)
+    else:
+        model = path_model_pretrained
+
+    data_train = get_tf_data(h5_file,
+                             clinical_df,
+                             output_shape_image=IMAGE_SHAPE,
+                             random_slice=True,
+                             label_to_contain="GTV L",
+                             random_shift=0,
+                             n_repeat=10,
+                             num_parallel_calls='auto',
+                             oversample_plc_neg=True,
+                             patient_list=patient_list_train).batch(bs)
+    data_val = get_tf_data(
+        h5_file,
+        clinical_df,
+        output_shape_image=IMAGE_SHAPE,
+        random_slice=False,
+        label_to_contain="GTV L",
+        patient_list=patient_list_val,
+    ).cache().batch(2)
+
+    early_stop_callback = CustomEarlyStopping(
+        min_epochs=0,
+        monitor='val_gtvl_metric',
         min_delta=0,
         patience=5,
         verbose=0,
         mode='min',
-        restore_best_weights=True)
-    model = model_builder(alpha=0.5,
-                          s_gtvl=40.0,
-                          w_gtvl=1.0,
-                          w_gtvt=1.0,
-                          w_lung=0.0)
+        restore_best_weights=True,
+    )
+    model = model_builder(
+        alpha=0.25,
+        w_gtvl=40.0,
+        w_gtvt=0.0,
+        w_lung=0.0,
+        model=model,
+        run_eagerly=False,
+    )
     model.fit(
         x=data_train,
         epochs=n_epochs,
         validation_data=data_val,
-        # callbacks=[early_stop_callback, tensorboard_callback],
+        callbacks=[early_stop_callback, tensorboard_callback],
     )
 
+    print(f"list of patient for testing : {patient_list_test}")
     model.save(path_model)
-    file_train.close()
+    volume_pred = compute_plc_volume(
+        model,
+        h5_file,
+        clinical_df,
+        image_shape=IMAGE_SHAPE,
+    )
+    volume_pred.to_csv(path_pred_volume)
+    results = compute_results(volume_pred, clinical_df)
+    print(f"The resulting AUCs are : {results}")
+    h5_file.close()
 
 
 if __name__ == '__main__':

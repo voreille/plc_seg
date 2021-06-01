@@ -4,9 +4,9 @@ import tensorflow.keras.backend as K
 from src.models.focal_loss import binary_focal_loss
 
 
-def gtvl_loss(y_true, y_pred, scaling=1.0, pos_weight=1.0):
+def gtvl_loss(y_true, y_pred, pos_weight=1.0):
     n_elems = tf.reduce_sum(y_true[..., 3], axis=(1, 2))
-    return scaling * tf.reduce_sum(
+    return tf.reduce_sum(
         binary_focal_loss(
             y_true[..., 1], y_pred[..., 1], pos_weight=pos_weight) *
         y_true[..., 3],
@@ -20,18 +20,16 @@ class CustomLoss(tf.keras.losses.Loss):
                  w_lung=1,
                  w_gtvt=1,
                  w_gtvl=4,
-                 s_gtvl=10,
                  name="custom_loss"):
         super().__init__(name=name)
         self.pos_weight = pos_weight
         self.w_lung = w_lung
         self.w_gtvt = w_gtvt
         self.w_gtvl = w_gtvl
-        self.s_gtvl = s_gtvl
 
     def _gtvl_loss(self, y_true, y_pred):
         n_elems = tf.reduce_sum(y_true[..., 3], axis=(1, 2))
-        return self.s_gtvl * tf.reduce_sum(
+        return tf.reduce_sum(
             binary_focal_loss(
                 y_true[..., 1], y_pred[..., 1], pos_weight=self.pos_weight) *
             y_true[..., 3],
@@ -43,8 +41,7 @@ class CustomLoss(tf.keras.losses.Loss):
                 (1 - dice_coe_1(y_true[..., 0], y_pred[..., 0])) +
                 self.w_lung *
                 (1 - dice_coe_1(y_true[..., 2], y_pred[..., 2])) +
-                self.w_gtvl * self._gtvl_loss(y_true, y_pred)) / (
-                    self.w_gtvl + self.w_gtvt + self.w_lung)
+                self.w_gtvl * self._gtvl_loss(y_true, y_pred))
 
 
 def masked_focal_loss(y_true, y_pred, mask, gamma=2):
@@ -139,7 +136,7 @@ def binary_focal_loss_custom(y_true, y_pred, gamma=2):
 
 def binary_focal_loss_fixed(y_true, y_pred, alpha=1, gamma=2):
     y_true = tf.cast(y_true, tf.float32)
-    # Define epsilon so that the back-propagation will not result in NaN for 0 
+    # Define epsilon so that the back-propagation will not result in NaN for 0
     epsilon = K.epsilon()
     # Add the epsilon to prediction value
     # y_pred = y_pred + epsilon

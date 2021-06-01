@@ -41,7 +41,7 @@ def main():
     data_test = get_tf_data(
         file_test,
         clinical_df,
-        output_shape=(256, 256),
+        output_shape_image=(256, 256),
         random_slice=False,
         centered_on_gtvt=True,
         return_complete_gtvl=True,
