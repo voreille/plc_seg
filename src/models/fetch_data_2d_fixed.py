@@ -1,13 +1,8 @@
 from pathlib import Path
-import os
-import time
 
 import tensorflow as tf
-import pandas as pd
 import numpy as np
 import SimpleITK as sitk
-import random
-from tensorflow.python.ops.gen_string_ops import regex_full_match
 
 from src.models.data_augmentation import compute_coordinate_matrix, slice_image
 from src.utils.image import get_ct_range
@@ -21,43 +16,18 @@ def get_tf_dataset(
     patient_list,
     path_data_nii,
     path_mask_lung_nii,
+    clinical_df,
     random_center=False,
     augment_angles=None,
-    augment_mirror=False,
     num_parallel_calls=None,
     output_shape=(256, 256),
     spacing=(1, 1, 1),
     ct_window_str="lung",
-    return_patient_name=False,
-    interp_order=3,
-    mask_smoothing=False,
-    smoothing_radius=3,
-    center_on_which_mask=0,
     interp_order_image=3,
     interp_order_mask=0,
     fill_mode="constant",
     fill_value=0.0,
 ):
-    """
-
-    Args:
-        path_data_nii (str): Path to the folder containing the original nii 
-        bbox_path (str): the path to the bounding box
-        augment_shift (float, optional): magnitute of random shifts. Defaults to None.
-        augment_mirror (bool, optional): Whether to apply random sagittal mirroring. Defaults to False.
-        augment_angles (tuple, optional): whether to apply random rotation, of maximal amplitude of
-                                         (angle_x, angle_y, angle_z) where the angle are defined in degree.
-        num_parallel_calls (int, optional): num of CPU for reading the data. If None tensorfow decides.
-        regex (str, optional): Regex expression to filter patient names. Defaults to None.
-                                If None no filtering is applied.
-        regex_in (bool, optional): Wether to exclude or include the regex. Defaults to True.
-        output_shape (tuple, optional): Output shape of the spatial domain. Defaults to (144,144,144).
-        return_patient_name (bool, optional): Wether to return the patient name
-
-
-    Returns:
-        [type]: [description]
-    """
 
     # Generate a tf.dataset for the paths to the folder
     patient_ds = tf.data.Dataset.from_tensor_slices(patient_list)
@@ -105,15 +75,55 @@ def get_tf_dataset(
         )
 
     # Mapping the parsing function
-    if num_parallel_calls is None:
-        num_parallel_calls = tf.data.experimental.AUTOTUNE
+    # if num_parallel_calls is None:
+    #     num_parallel_calls = tf.data.experimental.AUTOTUNE
+    num_parallel_calls = tf.data.experimental.AUTOTUNE
 
-    volume_ds = patient_ds.map(f1, num_parallel_calls=num_parallel_calls).cache()
+    volume_ds = patient_ds.map(f1,
+                               num_parallel_calls=num_parallel_calls).cache()
     image_ds = volume_ds.map(f2, num_parallel_calls=num_parallel_calls)
 
     # if return_patient_name is False:
     #     image_ds = image_ds.map(lambda x, y, z: (x, y))
+    plc_ds = patient_ds.map(lambda p: tf_plc(p, clinical_df))
+    image_ds = tf.data.Dataset.zip(
+        (image_ds, plc_ds)).map(tf_compute_mask,
+                                num_parallel_calls=num_parallel_calls)
     return image_ds
+
+
+def tf_compute_mask(image_ds_output, plc_ds_output):
+    image, mask = image_ds_output
+    plc_status, sick_lung_axis = plc_ds_output
+    mask_loss = tf.where(plc_status == 1,
+                         x=1 - mask[..., sick_lung_axis[0]] + mask[..., 0] +
+                         mask[..., 1],
+                         y=tf.ones(mask.shape[:2]))
+    mask_gtvl = tf.where(plc_status == 1,
+                         x=mask[..., 1],
+                         y=tf.zeros(mask.shape[:2]))
+
+    mask_loss = tf.where(mask_loss >= 1, x=1.0, y=0.0)
+    return image, tf.stack(
+        [mask[..., 0], mask_gtvl, mask[..., 2] + mask[..., 3], mask_loss],
+        axis=-1)
+
+
+def tf_plc(patient, clinical_df):
+    def parse_plc(patient):
+        patient_id = int(patient.numpy().decode("utf-8").split('_')[-1])
+        plc_status = int(clinical_df.loc[patient_id, "plc_status"])
+        sick_lung_axis = int(clinical_df.loc[patient_id, "sick_lung_axis"])
+        return np.array([plc_status]), np.array([sick_lung_axis])
+
+    plc_status, sick_lung_axis = tf.py_function(
+        parse_plc,
+        inp=[patient],
+        Tout=(tf.int8, tf.int32),
+    )
+    plc_status.set_shape((1, ))
+    sick_lung_axis.set_shape((1, ))
+    return plc_status, sick_lung_axis
 
 
 def tf_slice_image(
@@ -172,7 +182,7 @@ def tf_slice_image(
     )
 
     i.set_shape(output_shape + (3, ))
-    m.set_shape(output_shape + (3, ))
+    m.set_shape(output_shape + (4, ))
     return i, m
 
 
@@ -208,6 +218,15 @@ def tf_parse_image(
 
     # image.set_shape(output_shape + (2, ))
     # mask.set_shape(output_shape + (4, ))
+    ct.set_shape((None, None, None))
+    pt.set_shape((None, None, None))
+    mask_lung1.set_shape((None, None, None))
+    mask_lung2.set_shape((None, None, None))
+    mask_gtvt.set_shape((None, None, None))
+    mask_gtvl.set_shape((None, None, None))
+    coordinate_matrix_ct.set_shape((4, 4))
+    coordinate_matrix_pt.set_shape((4, 4))
+    coordinate_matrix_mask_lung.set_shape((4, 4))
     return (ct, pt, mask_lung1, mask_lung2, mask_gtvt, mask_gtvl,
             coordinate_matrix_ct, coordinate_matrix_pt,
             coordinate_matrix_mask_lung)
@@ -219,12 +238,6 @@ def parse_image(
     path_lung_mask_nii,
     ct_window_str="lung",
 ):
-    """Parse the raw data of HECKTOR 2020
-
-    Args:
-        folder_name ([Path]): the path of the folder containing 
-        the 3 sitk images (ct, pt and mask)
-    """
     patient_name = patient.numpy().decode("utf-8")
     # patient_name = patient
     ct_sitk = sitk.ReadImage(

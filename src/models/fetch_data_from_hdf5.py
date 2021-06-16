@@ -21,18 +21,22 @@ def unravel_mask(mask):
                     axis=-1).astype(np.float32)
 
 
-def get_tf_data(file,
+def get_tf_data(h5_file,
                 clinical_df,
-                output_shape=(256, 256),
+                output_shape_image=(256, 256, 3),
                 random_slice=True,
-                centered_on_gtvt=False,
+                label_to_contain="GTV T",
                 random_shift=None,
-                n_repeat=None,
+                ct_clip_values=[-1350, 150],
+                pt_clip_values=[0, 2.5],
+                n_repeat=1,
+                plc_ratio=0.5,
                 num_parallel_calls=None,
                 oversample_plc_neg=False,
                 patient_list=None,
                 return_plc_status=False,
-                return_complete_gtvl=False):
+                return_complete_gtvl=False,
+                return_patient=False):
     """mask: mask_gtvt, mask_gtvl, mask_lung1, mask_lung2
 
     Args:
@@ -46,7 +50,10 @@ def get_tf_data(file,
         [type]: [description]
     """
     if patient_list is None:
-        patient_list = list(file.keys())
+        patient_list = list(h5_file.keys())
+
+    n_patient = len(patient_list)
+
     if oversample_plc_neg:
         patient_list_plc_neg = [
             p for p in patient_list
@@ -57,15 +64,20 @@ def get_tf_data(file,
             if clinical_df.loc[int(p.split('_')[1]), "plc_status"] == 1
         ]
         shuffle(patient_list_plc_neg)
-        diff_patient = len(
-            patient_list_plc_pos) - len(patient_list_plc_neg) * 2
-        # patient_list = patient_list_plc_neg
-        patient_list.extend(patient_list_plc_neg)
-        patient_list.extend(patient_list_plc_neg[:diff_patient])
-    shuffle(patient_list)
-    patient_ds = tf.data.Dataset.from_tensor_slices(patient_list)
-    if n_repeat:
-        patient_ds = patient_ds.repeat(n_repeat)
+        shuffle(patient_list_plc_pos)
+        patient_pos_ds = tf.data.Dataset.from_tensor_slices(
+            patient_list_plc_pos).repeat()
+        patient_neg_ds = tf.data.Dataset.from_tensor_slices(
+            patient_list_plc_neg).repeat()
+        patient_ds = tf.data.experimental.sample_from_datasets(
+            [patient_pos_ds, patient_neg_ds],
+            weights=[plc_ratio, 1 - plc_ratio],
+        )
+
+    else:
+        shuffle(patient_list)
+        patient_ds = tf.data.Dataset.from_tensor_slices(patient_list).repeat()
+    patient_ds = patient_ds.take(n_patient * n_repeat)
 
     def f(patient):
         patient = patient.numpy().decode("utf-8")
@@ -73,8 +85,8 @@ def get_tf_data(file,
         plc_status = float(clinical_df.loc[int(patient_id), "plc_status"])
         sick_lung_axis = int(clinical_df.loc[int(patient_id),
                                              "sick_lung_axis"])
-        image = file[patient]["image"][()]
-        mask = file[patient]["mask"][()]
+        image = h5_file[patient]["image"][()]
+        mask = h5_file[patient]["mask"][()]
         # mask = unravel_mask(file[patient]["mask"][()])
         w, h, n_slices, c = image.shape
         bb_lung = get_bb_mask_voxel(mask[..., 2] + mask[..., 3])
@@ -82,20 +94,27 @@ def get_tf_data(file,
         bb_gtvl = get_bb_mask_voxel(mask[..., 1])
         bb_gtvt = get_bb_mask_voxel(mask[..., 0])
         if random_slice:
-            s = randint(bb_gtvl[2], bb_gtvl[5])
-        elif random_slice and plc_status == 0:
-            s = randint(bb_gtvt[2], bb_gtvt[5])
-        elif centered_on_gtvt:
-            s = (bb_gtvt[5] + bb_gtvt[2]) // 2
+            # s = randint(bb_gtvt[2] + 1, bb_gtvt[5] - 1)
+            if label_to_contain == "GTV T":
+                s = randint(bb_gtvt[2] + 1, bb_gtvt[5] - 1)
+            elif label_to_contain == "GTV L":
+                s = randint(bb_gtvl[2] + 1, bb_gtvl[5] - 1)
+            else:
+                s = randint(1, n_slices - 1)
         else:
-            s = (bb_gtvl[5] + bb_gtvl[2]) // 2
+            if label_to_contain == "GTV T":
+                s = (bb_gtvt[5] + bb_gtvt[2]) // 2
+            elif label_to_contain == "GTV L":
+                s = (bb_gtvl[5] + bb_gtvl[2]) // 2
+            else:
+                s = n_slices // 2
         if random_shift:
             center += np.array([
                 randint(-random_shift, random_shift),
                 randint(-random_shift, random_shift)
             ])
 
-        r = [output_shape[i] // 2 for i in range(2)]
+        r = [output_shape_image[i] // 2 for i in range(2)]
         mask = mask[center[0] - r[0]:center[0] + r[0],
                     center[1] - r[1]:center[1] + r[1], s, :]
         if plc_status == 1:
@@ -123,19 +142,25 @@ def get_tf_data(file,
                 ],
                 axis=-1,
             )
-        return image[center[0] - r[0]:center[0] + r[0],
-                     center[1] - r[1]:center[1] + r[1],
-                     s, :], mask, np.array([plc_status])
+        image = np.squeeze(image[center[0] - r[0]:center[0] + r[0],
+                                 center[1] - r[1]:center[1] + r[1], s, :])
+        # image = standardize_image(image[center[0] - r[0]:center[0] + r[0],
+        #                                 center[1] - r[1]:center[1] + r[1],
+        #                                 s, :],
+        #                           ct_clip_values,
+        #                           pt_clip_values,
+        #                           input_channels=output_shape_image[2])
+        return image, mask, np.array([plc_status])
 
     def tf_f(patient):
         [image, mask,
          plc_status] = tf.py_function(f, [patient],
                                       [tf.float32, tf.float32, tf.float32])
-        image.set_shape(output_shape + (3, ))
+        image.set_shape(output_shape_image)
         if return_complete_gtvl:
-            mask.set_shape(output_shape + (5, ))
+            mask.set_shape(output_shape_image[:2] + (5, ))
         else:
-            mask.set_shape(output_shape + (4, ))
+            mask.set_shape(output_shape_image[:2] + (4, ))
         plc_status.set_shape((1, ))
         return image, mask, plc_status
 
@@ -144,13 +169,39 @@ def get_tf_data(file,
             num_parallel_calls = tf.data.experimental.AUTOTUNE
 
         out_ds = patient_ds.map(
-            tf_f,
+            lambda patient: (*tf_f(patient), patient),
             num_parallel_calls=num_parallel_calls,
         )
     else:
-        out_ds = patient_ds.map(tf_f)
+        out_ds = patient_ds.map(lambda patient: (*tf_f(patient), patient))
 
-    if not return_complete_gtvl:
-        out_ds = out_ds.map(lambda x, y, p: (x, y))
+    if return_plc_status is False and return_patient is False:
+        out_ds = out_ds.map(lambda x, y, plc_status, patient: (x, y))
+    elif return_plc_status is False and return_patient is True:
+        out_ds = out_ds.map(lambda x, y, plc_status, patient: (x, y, patient))
+    elif return_plc_status is True and return_patient is False:
+        out_ds = out_ds.map(lambda x, y, plc_status, patient:
+                            (x, y, plc_status))
 
     return out_ds
+
+
+def standardize_image(image, ct_clip_values, pt_clip_values, input_channels=3):
+    ct = image[:, :, 0]
+    pt = image[:, :, 1]
+    ct[ct > ct_clip_values[1]] = ct_clip_values[1]
+    ct[ct < ct_clip_values[0]] = ct_clip_values[0]
+    ct = (2 * ct - ct_clip_values[1] -
+          ct_clip_values[0]) / (ct_clip_values[1] - ct_clip_values[0])
+
+    pt[pt > pt_clip_values[1]] = pt_clip_values[1]
+    pt[pt < pt_clip_values[0]] = pt_clip_values[0]
+    pt = (2 * pt - pt_clip_values[1] -
+          pt_clip_values[0]) / (pt_clip_values[1] - pt_clip_values[0])
+
+    if input_channels == 3:
+        return np.stack([ct, pt, image[..., 2]], axis=-1)
+    elif input_channels == 2:
+        return np.stack([ct, pt], axis=-1)
+    else:
+        raise ValueError("This number of channel is not implemented")
