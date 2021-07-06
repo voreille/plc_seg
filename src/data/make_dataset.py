@@ -3,7 +3,6 @@ from pathlib import Path
 
 import dotenv
 import numpy as np
-import pandas as pd
 import h5py
 from tqdm import tqdm
 import SimpleITK as sitk
@@ -26,12 +25,12 @@ path_mask_lung_nii = Path(
     "/home/valentin/python_wkspce/plc_seg/data/interim/nii_resampled")
 # path_clinical_info = Path(os.environ["CLINIC_INFO_PATH"])
 
-path_output = project_dir / "data/processed/2d_pet_normalized"
+path_output = project_dir / "data/processed/hdf5_2d"
 
 path_output.mkdir(parents=True, exist_ok=True)
 
-image_size = (224, 224)
-n_epochs = 1000
+# suv_high = 2.5
+# suv_low = 0
 
 
 def to_np(x):
@@ -50,14 +49,14 @@ def get_bb_mask_voxel(mask):
 
 
 def get_bb_mask_sitk_voxel(mask_sitk):
-    mask = sitk.GetArrayFromImage(mask_sitk)
+    mask = to_np(sitk.GetArrayFromImage(mask_sitk))
     positions = np.where(mask != 0)
-    z_min = np.min(positions[0])
+    x_min = np.min(positions[0])
     y_min = np.min(positions[1])
-    x_min = np.min(positions[2])
-    z_max = np.max(positions[0])
+    z_min = np.min(positions[2])
+    x_max = np.max(positions[0])
     y_max = np.max(positions[1])
-    x_max = np.max(positions[2])
+    z_max = np.max(positions[2])
     return x_min, y_min, z_min, x_max, y_max, z_max
 
 
@@ -106,13 +105,7 @@ def parse_image(
     mask_lung_sitk = sitk.ReadImage(
         str((path_lung_mask_nii /
              (patient_name + "__LUNG__SEG__CT.nii.gz")).resolve()))
-    # print(f"Time reading the files for patient {patient} : {time.time()-t1}")
-    # t1 = time.time()
-    # compute center
-    # bb_gtvt = get_bb_mask_mm(mask_gtvt_sitk)
-    # bb_gtvl = get_bb_mask_mm(mask_gtvl_sitk)
-    # z_max = np.max([bb_gtvt[-1], bb_gtvl[-1]])
-    # z_min = np.min([bb_gtvt[2], bb_gtvl[2]])
+
     mask_lung1_sitk, mask_lung2_sitk = split_lung_mask(mask_lung_sitk)
     if mask_smoothing:
         smoother = sitk.BinaryMedianImageFilter()
@@ -128,10 +121,14 @@ def parse_image(
 
     ct = to_np(ct_sitk)
     pt = to_np(pt_sitk)
-    hu_low, hu_high = get_ct_range(ct_window_str)
-    ct[ct > hu_high] = hu_high
-    ct[ct < hu_low] = hu_low
-    ct = (2 * ct - hu_high - hu_low) / (hu_high - hu_low)
+    # hu_low, hu_high = get_ct_range(ct_window_str)
+    # ct[ct > hu_high] = hu_high
+    # ct[ct < hu_low] = hu_low
+    # ct = (2 * ct - hu_high - hu_low) / (hu_high - hu_low)
+
+    # pt[pt > suv_high] = suv_high
+    # pt[pt < suv_low] = suv_low
+    # pt = (2 * pt - suv_high - suv_low) / (suv_high - suv_low)
 
     pt = normalize_image(pt)
 
@@ -148,27 +145,19 @@ def parse_image(
         mask_lung1,
         mask_lung2,
         s1=z_min,
-        s2=z_max)
+        s2=z_max,
+    )
 
     image = np.stack([ct, pt, np.zeros_like(ct)], axis=-1)
     mask = np.stack([mask_gtvt, mask_gtvl, mask_lung1, mask_lung2], axis=-1)
-    # mask = np.zeros_like(mask_gtvt)
-    # mask[mask_gtvt >= 0.5] = 1
-    # mask[mask_gtvl >= 0.5] = 2
-    # mask[mask_lung1 >= 0.5] = 3
-    # mask[mask_lung2 >= 0.5] = 4
 
     mask[mask >= 0.5] = 1
     mask[mask < 0.5] = 0
 
-    # print(f"Time preprocessing for patient {patient} : {time.time()-t1}")
     return image, mask.astype(np.uint8)
 
 
 def main():
-    """ Runs data processing scripts to turn raw data from (../raw) into
-        cleaned data ready to be analyzed (saved in ../processed).
-    """
     patient_list = [
         f.name.split("__")[0] for f in path_mask_lung_nii.rglob("*LUNG*")
     ]

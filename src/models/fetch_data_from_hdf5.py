@@ -79,8 +79,8 @@ def get_tf_data(
         plc_status = float(clinical_df.loc[int(patient_id), "plc_status"])
         sick_lung_axis = int(clinical_df.loc[int(patient_id),
                                              "sick_lung_axis"])
-        image = file[patient]["image"][()]
-        mask = file[patient]["mask"][()]
+        image = h5_file[patient]["image"][()]
+        mask = h5_file[patient]["mask"][()]
         # mask = unravel_mask(file[patient]["mask"][()])
         # w, h, n_slices, c = image.shape
         bb_lung = get_bb_mask_voxel(mask[..., 2] + mask[..., 3])
@@ -88,20 +88,27 @@ def get_tf_data(
         bb_gtvl = get_bb_mask_voxel(mask[..., 1])
         bb_gtvt = get_bb_mask_voxel(mask[..., 0])
         if random_slice:
-            s = randint(bb_gtvl[2], bb_gtvl[5])
-        elif random_slice and plc_status == 0:
-            s = randint(bb_gtvt[2], bb_gtvt[5])
-        elif centered_on_gtvt:
-            s = (bb_gtvt[5] + bb_gtvt[2]) // 2
+            # s = randint(bb_gtvt[2] + 1, bb_gtvt[5] - 1)
+            if label_to_contain == "GTV T":
+                s = randint(bb_gtvt[2] + 1, bb_gtvt[5] - 1)
+            elif label_to_contain == "GTV L":
+                s = randint(bb_gtvl[2] + 1, bb_gtvl[5] - 1)
+            else:
+                s = randint(1, n_slices - 1)
         else:
-            s = (bb_gtvl[5] + bb_gtvl[2]) // 2
+            if label_to_contain == "GTV T":
+                s = (bb_gtvt[5] + bb_gtvt[2]) // 2
+            elif label_to_contain == "GTV L":
+                s = (bb_gtvl[5] + bb_gtvl[2]) // 2
+            else:
+                s = n_slices // 2
         if random_shift:
             center += np.array([
                 randint(-random_shift, random_shift),
                 randint(-random_shift, random_shift)
             ])
 
-        r = [output_shape[i] // 2 for i in range(2)]
+        r = [output_shape_image[i] // 2 for i in range(2)]
         mask = mask[center[0] - r[0]:center[0] + r[0],
                     center[1] - r[1]:center[1] + r[1], s, :]
         if plc_status == 1:
@@ -129,19 +136,25 @@ def get_tf_data(
                 ],
                 axis=-1,
             )
-        return image[center[0] - r[0]:center[0] + r[0],
-                     center[1] - r[1]:center[1] + r[1],
-                     s, :], mask, np.array([plc_status])
+        image = np.squeeze(image[center[0] - r[0]:center[0] + r[0],
+                                 center[1] - r[1]:center[1] + r[1], s, :])
+        # image = standardize_image(image[center[0] - r[0]:center[0] + r[0],
+        #                                 center[1] - r[1]:center[1] + r[1],
+        #                                 s, :],
+        #                           ct_clip_values,
+        #                           pt_clip_values,
+        #                           input_channels=output_shape_image[2])
+        return image, mask, np.array([plc_status])
 
     def tf_f(patient):
         [image, mask,
          plc_status] = tf.py_function(f, [patient],
                                       [tf.float32, tf.float32, tf.float32])
-        image.set_shape(output_shape + (3, ))
+        image.set_shape(output_shape_image)
         if return_complete_gtvl:
-            mask.set_shape(output_shape + (5, ))
+            mask.set_shape(output_shape_image[:2] + (5, ))
         else:
-            mask.set_shape(output_shape + (4, ))
+            mask.set_shape(output_shape_image[:2] + (4, ))
         plc_status.set_shape((1, ))
         return image, mask, plc_status
 
@@ -150,7 +163,7 @@ def get_tf_data(
             num_parallel_calls = tf.data.experimental.AUTOTUNE
 
         out_ds = patient_ds.map(
-            tf_f,
+            lambda patient: (*tf_f(patient), patient),
             num_parallel_calls=num_parallel_calls,
         )
         if random_angle:

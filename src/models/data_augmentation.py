@@ -3,6 +3,7 @@ import tensorflow as tf
 import tensorflow_addons as tfa
 import scipy
 import numpy as np
+from scipy.interpolate import RegularGridInterpolator
 
 from src.utils.image import normalize_image, get_ct_range
 
@@ -32,10 +33,10 @@ def get_bb_mask_voxel(mask):
 
 def transform_matrix_offset(matrix, center):
     o_x, o_y, o_z = center
-    offset_matrix = np.array([[1, 0, 0, o_x], [0, 1, 0, o_y], [0, 0, 1, o_z],
-                              [0, 0, 0, 1]])
-    reset_matrix = np.array([[1, 0, 0, -o_x], [0, 1, 0, -o_y], [0, 0, 1, -o_z],
+    reset_matrix = np.array([[1, 0, 0, o_x], [0, 1, 0, o_y], [0, 0, 1, o_z],
                              [0, 0, 0, 1]])
+    offset_matrix = np.array([[1, 0, 0, -o_x], [0, 1, 0, -o_y],
+                              [0, 0, 1, -o_z], [0, 0, 0, 1]])
     transform_matrix = np.dot(np.dot(reset_matrix, matrix), offset_matrix)
     return transform_matrix
 
@@ -81,7 +82,7 @@ def get_rotation_matrix(angles=(0, 0, 0), center=(0, 0, 0)):
             transform_matrix = rotation_matrix
         else:
             transform_matrix = np.dot(transform_matrix, rotation_matrix)
-    if transform_matrix:
+    if transform_matrix is not None:
         return transform_matrix_offset(transform_matrix, center)
     else:
         return np.identity(4)
@@ -118,7 +119,7 @@ def get_shearing_matrix(shears, center=(0, 0, 0)):
         else:
             transform_matrix = np.dot(transform_matrix, shear_matrix)
 
-    if transform_matrix:
+    if transform_matrix is not None:
         return transform_matrix_offset(transform_matrix, center)
     else:
         return np.identity(4)
@@ -170,7 +171,7 @@ def recenter_center(center, output_shape, image_shape):
     pos_max = center + (np.array(output_shape) // 2)
     pos_min = center - (np.array(output_shape) // 2)
     # Check if the the output image is outside the image and correct it
-    delta_out = image_shape[3:] - pos_max
+    delta_out = image_shape[:3] - pos_max
     delta_out[delta_out > 0] = 0
     new_center = center + delta_out
 
@@ -243,9 +244,8 @@ def slice_image(ct,
                 interp_order_mask=0,
                 fill_mode='constant',
                 fill_value=0.0):
-    mask_lung = mask_lung1 + mask_lung2
-    # mask_lung[np.where(mask_lung != 0)] = 1
 
+    t = time.time()
     if len(output_shape) == 2:
         output_shape = tuple(output_shape) + (1, )
         output_shape = np.array(output_shape)
@@ -253,11 +253,15 @@ def slice_image(ct,
         raise ValueError(
             "Fuck you, that's not a fuckcimng shape that you're giving me !!")
 
+    angles = tuple([
+        np.random.uniform(low=-augment_angles[k], high=augment_angles[k])
+        for k in range(3)
+    ])
     rotation_matrix_mm, center_mm = get_transform_matrix(
-        coordinate_matrix_ct,
+        coordinate_matrix_ct,  # is needed for the mask_of_interest
         output_shape=output_shape,
         spacing=spacing,
-        augment_angles=augment_angles,
+        augment_angles=angles,
         random_center=random_center,
         mask_of_interest=mask_gtvt,
     )
@@ -271,44 +275,74 @@ def slice_image(ct,
     mat_pt = np.dot(np.linalg.inv(coordinate_matrix_pt), mat_trans)
     mat_lung = np.dot(np.linalg.inv(coordinate_matrix_mask_lung), mat_trans)
 
-    im = np.stack([
-        scipy.ndimage.interpolation.affine_transform(image,
-                                                     mat[:3, :3],
-                                                     mat[:3, 3],
-                                                     order=interp_order_image,
-                                                     output_shape=output_shape,
-                                                     mode=fill_mode,
-                                                     cval=fill_value)
-        for image, mat in [(ct, mat_ct), (pt, mat_pt)]
-    ],
-                  axis=-1)
-    msk = np.stack(
-        [
-            scipy.ndimage.interpolation.affine_transform(
-                mask,
-                mat[:3, :3],
-                mat[:3, 3],
-                order=interp_order_mask,
-                output_shape=output_shape,
-                mode=fill_mode,
-                cval=fill_value) for mask, mat in [
-                    (mask_lung, mat_lung),
-                    # (mask_lung2, mat_lung),
-                    (mask_gtvt, mat_ct),
-                    (mask_gtvl, mat_ct),
-                ]
-        ],
-        axis=-1)
-    msk[msk > 0.5] = 1
-    msk[msk < 0.5] = 0,
+    # image = np.stack(
+    #     [
+    #         scipy.ndimage.interpolation.affine_transform(
+    #             im,
+    #             mat[:3, :3],
+    #             mat[:3, 3],
+    #             order=interp_order_image,
+    #             output_shape=output_shape,
+    #             mode=fill_mode,
+    #             cval=fill_value,
+    #         ) for im, mat in [(ct, mat_ct), (pt, mat_pt)]
+    #     ],
+    #     axis=-1,
+    # )
 
-    im = np.squeeze(im)
-    im = np.stack(
-        [im[..., 0],
-         normalize_image(im[..., 1]),
-         np.zeros_like(im[..., 1])],
-        axis=-1)
-    return im, np.squeeze(msk)
+    image = np.stack(
+        [
+            fast_resampling(im, mat, output_shape, method="linear")
+            for im, mat in [(ct, mat_ct), (pt, mat_pt)]
+        ],
+        axis=-1,
+    )
+    mask = np.stack(
+        [
+            fast_resampling(msk, mat, output_shape, method="nearest")
+            for msk, mat in [
+                (mask_gtvt, mat_ct),
+                (mask_gtvl, mat_ct),
+                (mask_lung1, mat_lung),
+                (mask_lung2, mat_lung),
+            ]
+        ],
+        axis=-1,
+    )
+
+    # mask = np.stack(
+    #     [
+    #         scipy.ndimage.interpolation.affine_transform(
+    #             msk,
+    #             mat[:3, :3],
+    #             mat[:3, 3],
+    #             order=interp_order_mask,
+    #             output_shape=output_shape,
+    #             mode=fill_mode,
+    #             cval=fill_value,
+    #         ) for msk, mat in [
+    #             (mask_gtvt, mat_ct),
+    #             (mask_gtvl, mat_ct),
+    #             (mask_lung1, mat_lung),
+    #             (mask_lung2, mat_lung),
+    #         ]
+    #     ],
+    #     axis=-1,
+    # )
+    mask[mask > 0.5] = 1
+    mask[mask < 0.5] = 0,
+
+    image = np.squeeze(image)
+    image = np.stack([
+        image[..., 0],
+        image[..., 1],
+        np.zeros_like(image[..., 1]),
+    ],
+                     axis=-1)
+
+    elapsed = time.time() - t
+    print(f"time elapse for one image {elapsed}")
+    return image, np.squeeze(mask)
 
 
 def compute_coordinate_matrix(
@@ -334,3 +368,31 @@ def compute_coordinate_matrix(
         ],
         [0, 0, 0, 1],
     ], )  # yapf: disable
+
+# yapf: enable
+
+
+def fast_resampling(np_volume, matrix, output_shape, method="linear"):
+    np_volume = np_volume.numpy()
+    input_shape = np_volume.shape
+
+    x_new = np.arange(output_shape[0])
+    y_new = np.arange(output_shape[1])
+    z_new = np.array([0])
+
+    x_old = np.arange(input_shape[0])
+    y_old = np.arange(input_shape[1])
+    z_old = np.arange(input_shape[2])
+
+    x, y, z = np.meshgrid(x_new, y_new, z_new, indexing='ij')
+
+    pts = np.array(list(zip(x.flatten(), y.flatten(), z.flatten())))
+    pts = np.concatenate([pts, np.ones((pts.shape[0], 1))], axis=1)
+    pts = np.dot(matrix, pts.T).T
+    interpolator = RegularGridInterpolator((x_old, y_old, z_old),
+                                           np_volume,
+                                           method=method,
+                                           bounds_error=False,
+                                           fill_value=0)
+
+    return interpolator(pts[:, :3]).reshape(output_shape)

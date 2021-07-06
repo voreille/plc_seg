@@ -1,6 +1,7 @@
 import os
 from pathlib import Path
 from random import shuffle
+import random
 import datetime
 
 import dotenv
@@ -9,7 +10,7 @@ import h5py
 import pandas as pd
 from tensorflow.python.keras.losses import SparseCategoricalCrossentropy
 
-from src.models.losses_2d import CustomLoss, gtvl_loss
+from src.models.losses_2d import CustomLoss, gtvl_loss, dice_coe_1_hard
 from src.models.fetch_data_from_hdf5 import get_tf_data
 from src.models.models_2d import (OUTPUT_CHANNELS, UnetClassif, unet_model,
                                   unetclassif_model, classif_model, Unet,
@@ -23,9 +24,22 @@ dotenv_path = project_dir / ".env"
 dotenv.load_dotenv(str(dotenv_path))
 log_dir = project_dir / ("logs/fit/" +
                          datetime.datetime.now().strftime("%Y%m%d-%H%M%S"))
-path_model = project_dir / "models/clean_model/model1"
+
+split_path = project_dir / "data/split.csv"
+
+# model_pretrained = "model_seg_gtvt_iantsen"
+model_pretrained = "model_seg_gtvt_iantsen"
+model = "model_iantsen_gtvl_pretrained_on_gtvt_lung"
+# model = "model_seg_gtvt_iantsen"
+path_model_pretrained = project_dir / f"models/clean_model/{model_pretrained}"
+path_model = project_dir / f"models/clean_model/{model}"
+
+output_directory = project_dir / "data/plc_volume"
+output_directory.mkdir(parents=True, exist_ok=True)
+path_pred_volume = output_directory / f"{model}.csv"
 
 path_clinical_info = Path(os.environ["CLINIC_INFO_PATH"])
+path_mean_sd = "/home/val/python_wkspce/plc_seg/data/mean_std.csv"
 
 bs = 32
 n_epochs = 200
@@ -90,6 +104,13 @@ def get_split_patient_lists(df, patient_list):
     id_patient_plc_pos_train = id_patient_plc_pos_training[13:]
     id_train = id_patient_plc_neg_train + id_patient_plc_pos_train
 
+def get_trainval_patient_list(df_path):
+    df = pd.read_csv(df_path).set_index("patient_id")
+    id_train = df[df["train_val_test"] == 0].index
+    id_val = df[df["train_val_test"] == 1].index
+    id_test = df[df["train_val_test"] == 2].index
+
+    patient_list_test = [f"PatientLC_{i}" for i in id_test]
     patient_list_val = [f"PatientLC_{i}" for i in id_val]
     patient_list_train = [f"PatientLC_{i}" for i in id_train]
     patient_list_test = [

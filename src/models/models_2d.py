@@ -162,6 +162,8 @@ def classif_model(output_channels,
 
     return tf.keras.Model(inputs=inputs, outputs=classifier(x))
 
+        return x10, self.classifier(
+            tf.keras.layers.concatenate([x1, x2, x3, x4, x5]))
 
 class UpBlock(tf.keras.layers.Layer):
     def __init__(self,

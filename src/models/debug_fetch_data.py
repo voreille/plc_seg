@@ -57,14 +57,14 @@ def main():
     data_val = get_tf_data(
         file_train,
         clinical_df,
-        output_shape=(256, 256),
+        output_shape_image=(256, 256),
         random_slice=False,
         centered_on_gtvt=True,
         patient_list_copy=patient_list_val,
     ).cache().batch(2)
     data_train = get_tf_data(file_train,
                              clinical_df,
-                             output_shape=(256, 256),
+                             output_shape_image=(256, 256),
                              random_slice=True,
                              random_shift=20,
                              n_repeat=10,

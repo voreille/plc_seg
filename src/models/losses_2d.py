@@ -2,6 +2,7 @@ import tensorflow as tf
 import tensorflow.keras.backend as K
 from tensorflow_addons.utils.types import FloatTensorLike, TensorLike
 
+from src.models.focal_loss import binary_focal_loss
 
 def gtvl_loss(y_true, y_pred, scaling=1.0, alpha=1.0):
     n_elems = tf.reduce_sum(y_true[..., 3], axis=(1, 2))
