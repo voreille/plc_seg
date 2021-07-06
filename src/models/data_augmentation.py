@@ -1,9 +1,22 @@
 from SimpleITK.SimpleITK import OrImageFilter
 import tensorflow as tf
+import tensorflow_addons as tfa
 import scipy
 import numpy as np
 
 from src.utils.image import normalize_image, get_ct_range
+
+
+@tf.function
+def random_rotate(image, mask, angle=10):
+    random_angle = tf.random.uniform(minval=-angle, maxval=angle,
+                                     shape=(1, )) * np.pi / 180.0
+    image = tfa.image.rotate(image, random_angle, fill_mode="reflect")
+    mask = tfa.image.rotate(mask,
+                            random_angle,
+                            interpolation="nearest",
+                            fill_mode="reflect")
+    return image, mask
 
 
 def get_bb_mask_voxel(mask):
@@ -36,7 +49,7 @@ def get_rotation_matrix(angles=(0, 0, 0), center=(0, 0, 0)):
         theta_x = 0
         theta_y = 0
         theta_z = 0
-        
+
     transform_matrix = None
     if theta_x != 0:
         theta = np.deg2rad(theta_x)
@@ -194,7 +207,7 @@ def get_transform_matrix(
         spacing)
 
     center_vx = (bb_mask_vx[3:] + bb_mask_vx[:3]) / 2
-    center_mm = np.dot(mat , np.array([*center_vx, 1]))[:3]
+    center_mm = np.dot(mat, np.array([*center_vx, 1]))[:3]
 
     if augment_angles != (0, 0, 0):
         rotation_matrix = get_rotation_matrix(angles=augment_angles,
@@ -206,7 +219,7 @@ def get_transform_matrix(
         center_out_vx = get_random_shift(bb_mask_vx,
                                          mask_of_interest.shape,
                                          output_shape=out_shape)
-        center_out_mm = np.dot(mat , np.array([*center_out_vx, 1]))[:3]
+        center_out_mm = np.dot(mat, np.array([*center_out_vx, 1]))[:3]
     else:
         center_out_mm = center_mm
 

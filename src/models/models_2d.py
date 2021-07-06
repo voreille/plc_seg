@@ -1,7 +1,11 @@
+from scipy.sparse import base
 import tensorflow as tf
+from tensorflow.keras import activations
+from tensorflow.python.keras.backend import dropout
+from tensorflow_addons.losses import sigmoid_focal_crossentropy
 
 from src.models.losses_2d import dice_coe_1, dice_coe_1_hard
-from src.models.focal_loss import binary_focal_loss
+from src.models.layers import ResidualLayer2D
 
 import matplotlib.pyplot as plt
 
@@ -81,221 +85,249 @@ def unet_model(output_channels, input_shape=(256, 256, 3)):
     return tf.keras.Model(inputs=inputs, outputs=x)
 
 
-def gtvl_loss(
-    y_true,
-    y_pred,
-    plc_status,
-    sick_lung_axis,
-    pos_weight=1.0,
-    scaling=10.0,
-):
-    mask = 1 - tf.where(sick_lung_axis[..., tf.newaxis] == 3,
-                        x=y_true[..., 3],
-                        y=y_true[..., 2]) + y_true[..., 1] + y_true[..., 0]
-    mask = tf.where(mask > 0.5, x=1.0, y=0.0)
-    n_elems = tf.reduce_sum(mask, axis=(1, 2))
-    return scaling * tf.where(
-        tf.squeeze(plc_status) >= 0.5,
-        x=tf.reduce_sum(binary_focal_loss(
-            y_true[..., 1], y_pred[..., 1], pos_weight=pos_weight) * mask,
-                        axis=(1, 2)) / n_elems,
-        y=tf.reduce_mean(binary_focal_loss(tf.zeros(tf.shape(y_pred[..., 1])),
-                                           y_pred[..., 1],
-                                           pos_weight=pos_weight),
-                         axis=(1, 2)))
+def unetclassif_model(output_channels, input_shape=(256, 256, 3)):
+    base_model = tf.keras.applications.MobileNetV2(input_shape=input_shape,
+                                                   include_top=False)
+
+    # Use the activations of these layers
+    layer_names = [
+        'block_1_expand_relu',  # 64x64
+        'block_3_expand_relu',  # 32x32
+        'block_6_expand_relu',  # 16x16
+        'block_13_expand_relu',  # 8x8
+        'block_16_project',  # 4x4
+    ]
+    layers = [base_model.get_layer(name).output for name in layer_names]
+
+    # Create the feature extraction model
+    down_stack = tf.keras.Model(inputs=base_model.input, outputs=layers)
+
+    down_stack.trainable = False
+    up_stack = [
+        upsample(512, 3),  # 4x4 -> 8x8
+        upsample(256, 3),  # 8x8 -> 16x16
+        upsample(128, 3),  # 16x16 -> 32x32
+        upsample(64, 3),  # 32x32 -> 64x64
+    ]
+
+    inputs = tf.keras.layers.Input(shape=input_shape)
+    x = inputs
+    x_classif = base_model(x)
+
+    # Downsampling through the model
+    skips = down_stack(x)
+    x = skips[-1]
+    skips = reversed(skips[:-1])
+
+    # Classifier
+    classifier = tf.keras.Sequential(name="classifier")
+    classifier.add(tf.keras.layers.GlobalAveragePooling2D())
+    classifier.add(tf.keras.layers.Dense(2, activation="softmax"))
+    x_classif = classifier(x_classif)
+
+    # Upsampling and establishing the skip connections
+    for up, skip in zip(up_stack, skips):
+        x = up(x)
+        concat = tf.keras.layers.Concatenate()
+        x = concat([x, skip])
+
+    # This is the last layer of the model
+    last = tf.keras.layers.Conv2DTranspose(output_channels,
+                                           3,
+                                           strides=2,
+                                           activation="sigmoid",
+                                           padding='same')  #64x64 -> 128x128
+
+    x = last(x)
+
+    return tf.keras.Model(inputs=inputs, outputs=[x, x_classif])
 
 
-def custom_loss(
-    y_true,
-    y_pred,
-    plc_status,
-    sick_lung_axis,
-    pos_weight=1.0,
-    w_lung=1,
-    w_gtvt=1,
-    w_gtvl=4,
-    s_gtvl=10,
-):
-    """ 0: gtvt, 1: gtvl, 2: lung1, 3: lung2
+def classif_model(output_channels,
+                  input_shape=(256, 256, 3),
+                  dropout_rate=0.2):
+    base_model = tf.keras.applications.MobileNetV2(input_shape=input_shape,
+                                                   include_top=False)
 
-    Args:
-        y_true ([type]): [description]
-        y_pred ([type]): [description]
-    """
-    return (w_gtvt *
-            (1 - dice_coe_1(y_true[..., 0], y_pred[..., 0])) + w_lung *
-            (1 - dice_coe_1(y_true[..., 2] + y_true[..., 3], y_pred[..., 2])) +
-            w_gtvl * gtvl_loss(
-                y_true,
-                y_pred,
-                plc_status,
-                sick_lung_axis,
-                pos_weight=pos_weight,
-                scaling=s_gtvl,
-            )) / (w_gtvl + w_gtvt + w_lung)
+    base_model.trainable = False
+    inputs = tf.keras.layers.Input(shape=input_shape)
+    x = inputs
+    x = base_model(x)
+
+    # Classifier
+    classifier = tf.keras.Sequential(name="classifier")
+    classifier.add(tf.keras.layers.GlobalAveragePooling2D())
+    classifier.add(tf.keras.layers.Dropout(dropout_rate))
+    classifier.add(tf.keras.layers.Dense(2, activation="softmax"))
+
+    return tf.keras.Model(inputs=inputs, outputs=classifier(x))
 
 
-class CustomModel(tf.keras.Model):
-    def __init__(
-        self,
-        *args,
-        alpha=1.0,
-        w_lung=1.0,
-        w_gtvt=1.0,
-        w_gtvl=4.0,
-        s_gtvl=4.0,
-        train_writer=None,
-        test_writer=None,
-        **kwargs,
-    ):
+class UpBlock(tf.keras.layers.Layer):
+    def __init__(self,
+                 filters,
+                 *args,
+                 upsampling_factor=1,
+                 filters_output=24,
+                 n_conv=2,
+                 **kwargs):
         super().__init__(*args, **kwargs)
-        self.alpha = alpha
-        self.w_lung = w_lung
-        self.w_gtvt = w_gtvt
-        self.w_gtvl = w_gtvl
-        self.s_gtvl = s_gtvl
-        self.train_writer = train_writer
-        self.test_writer = test_writer
+        self.upsampling_factor = upsampling_factor
+        self.conv = tf.keras.Sequential()
+        for k in range(n_conv):
+            self.conv.add(
+                tf.keras.layers.Conv2D(filters,
+                                       3,
+                                       padding='SAME',
+                                       activation='relu'), )
+        self.trans_conv = tf.keras.layers.Conv2DTranspose(filters,
+                                                          3,
+                                                          strides=(2, 2),
+                                                          padding='SAME',
+                                                          activation='relu')
+        self.concat = tf.keras.layers.Concatenate()
+        if upsampling_factor != 1:
+            self.upsampling = tf.keras.Sequential([
+                tf.keras.layers.Conv2D(filters_output,
+                                       1,
+                                       padding='SAME',
+                                       activation='relu'),
+                tf.keras.layers.UpSampling2D(size=(upsampling_factor,
+                                                   upsampling_factor)),
+            ])
+        else:
+            self.upsampling = None
 
-        self.loss_tracker = tf.keras.metrics.Mean(name="loss")
-        self.gtvl_loss_tracker = tf.keras.metrics.Mean(name="gtvl_loss")
-        self.gtvt_dice_tracker = tf.keras.metrics.Mean(name="gtvt_dice")
-        self.lung_dice_tracker = tf.keras.metrics.Mean(name="lung_dice")
+    def call(self, inputs, training=None):
+        x, skip = inputs
+        x = self.trans_conv(x)
+        x = self.concat([x, skip])
+        x = self.conv(x)
+        if self.upsampling:
+            return x, self.upsampling(x)
+        else:
+            return x
 
-        self.val_loss_tracker = tf.keras.metrics.Mean(name="val_loss")
-        self.val_gtvl_loss_tracker = tf.keras.metrics.Mean(name="gtvl_loss")
-        self.val_gtvt_dice_tracker = tf.keras.metrics.Mean(
-            name="val_gtvt_dice")
-        self.val_lung_dice_tracker = tf.keras.metrics.Mean(
-            name="val_lung_dice")
 
-    def train_step(self, data):
-        x, y, plc_status, sick_lung_axis = data
-
-        with tf.GradientTape() as tape:
-            y_pred = self(x, training=True)  # Forward pass
-            # Compute our own loss
-            loss = custom_loss(
-                y,
-                y_pred,
-                plc_status,
-                sick_lung_axis,
-                pos_weight=self.alpha,
-                w_lung=self.w_lung,
-                w_gtvt=self.w_gtvt,
-                w_gtvl=self.w_gtvl,
-                s_gtvl=self.s_gtvl,
-            )
-
-        # Compute gradients
-        trainable_vars = self.trainable_variables
-        gradients = tape.gradient(loss, trainable_vars)
-
-        # Update weights
-        self.optimizer.apply_gradients(zip(gradients, trainable_vars))
-
-        self.loss_tracker.update_state(loss)
-        self.gtvl_loss_tracker.update_state(
-            gtvl_loss(y,
-                      y_pred,
-                      plc_status,
-                      sick_lung_axis,
-                      pos_weight=self.alpha,
-                      scaling=self.s_gtvl))
-        self.gtvt_dice_tracker.update_state(
-            tf.reduce_mean(dice_coe_1_hard(y[..., 0], y_pred[..., 0])))
-        self.lung_dice_tracker.update_state(
-            tf.reduce_mean(
-                dice_coe_1_hard(y[..., 2] + y[..., 3], y_pred[..., 2])))
-
-        if self.train_writer:
-            with self.train_writer.as_default():
-                tf.summary.scalar(
-                    'loss',
-                    self.loss_tracker.result(),
-                )
-
-        return {
-            "loss": self.loss_tracker.result(),
-            "gtvl_loss": self.gtvl_loss_tracker.result(),
-            "dice_gtvt": self.gtvt_dice_tracker.result(),
-            "dice_lung": self.lung_dice_tracker.result()
-        }
-
-    def test_step(self, data):
-        # Unpack the data
-        x, y, plc_status, sick_lung_axis = data
-        # Compute predictions
-        y_pred = self(x, training=False)
-
-        self.val_loss_tracker.update_state(
-            custom_loss(
-                y,
-                y_pred,
-                plc_status,
-                sick_lung_axis,
-                pos_weight=self.alpha,
-                w_lung=self.w_lung,
-                w_gtvt=self.w_gtvt,
-                w_gtvl=self.w_gtvl,
-                s_gtvl=self.s_gtvl,
-            ))
-        self.val_gtvl_loss_tracker.update_state(
-            gtvl_loss(
-                y,
-                y_pred,
-                plc_status,
-                sick_lung_axis,
-                pos_weight=self.alpha,
-                scaling=self.s_gtvl,
-            ))
-        self.val_gtvt_dice_tracker.update_state(
-            dice_coe_1_hard(y[..., 0], y_pred[..., 0]))
-        self.val_lung_dice_tracker.update_state(
-            dice_coe_1_hard(y[..., 2] + y[..., 3], y_pred[..., 2]))
-
-        if self.test_writer:
-            with self.test_writer.as_default():
-                tf.summary.scalar(
-                    'val_loss',
-                    self.val_loss_tracker.result(),
-                )
-
-        return {
-            "loss": self.val_loss_tracker.result(),
-            "gtvl_loss": self.val_gtvl_loss_tracker.result(),
-            "dice_gtvt": self.val_gtvt_dice_tracker.result(),
-            "dice_lung": self.val_lung_dice_tracker.result()
-        }
-
-    @property
-    def metrics(self):
-        # We list our `Metric` objects here so that `reset_states()` can be
-        # called automatically at the start of each epoch
-        # or at the start of `evaluate()`.
-        # If you don't implement this property, you have to call
-        # `reset_states()` yourself at the time of your choosing.
-        return [
-            self.loss_tracker,
-            self.gtvl_loss_tracker,
-            self.gtvt_dice_tracker,
-            self.lung_dice_tracker,
-            self.val_loss_tracker,
-            self.val_gtvl_loss_tracker,
-            self.val_gtvt_dice_tracker,
-            self.val_lung_dice_tracker,
+class Unet(tf.keras.Model):
+    def __init__(self, *args, output_channels=3, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.down_stack = [
+            self.get_first_block(24),
+            self.get_down_block(48),
+            self.get_down_block(96),
+            self.get_down_block(192),
+            self.get_down_block(384),
         ]
 
+        self.up_stack = [
+            UpBlock(192, upsampling_factor=8),
+            UpBlock(96, upsampling_factor=4),
+            UpBlock(48, upsampling_factor=2),
+            UpBlock(24, n_conv=1),
+        ]
+        self.last = tf.keras.Sequential([
+            tf.keras.layers.Conv2D(24, 3, activation='relu', padding='SAME'),
+            tf.keras.layers.Conv2D(output_channels,
+                                   1,
+                                   activation='sigmoid',
+                                   padding='SAME'),
+        ])
 
-class IdentityLayer(tf.keras.layers.Layer):
-    def call(self, inputs):
-        return inputs
+    def get_first_block(self, filters):
+        return tf.keras.Sequential([
+            ResidualLayer2D(filters, 7, padding='SAME'),
+            ResidualLayer2D(filters, 3, padding='SAME'),
+        ])
+
+    def get_down_block(self, filters):
+        return tf.keras.Sequential([
+            tf.keras.layers.MaxPool2D(pool_size=(2, 2), padding='SAME'),
+            ResidualLayer2D(filters, 3, padding='SAME'),
+            ResidualLayer2D(filters, 3, padding='SAME'),
+            ResidualLayer2D(filters, 3, padding='SAME'),
+        ])
+
+    def call(self, inputs, training=None):
+        x = inputs
+        skips = []
+        for block in self.down_stack:
+            x = block(x, training=training)
+            skips.append(x)
+
+        skips = reversed(skips[:-1])
+        xs_upsampled = []
+
+        for block, skip in zip(self.up_stack, skips):
+            x = block((x, skip), training=training)
+            if type(x) is tuple:
+                x, x_upsampled = x
+                xs_upsampled.append(x_upsampled)
+
+        x += tf.add_n(xs_upsampled)
+        return self.last(x)
 
 
-def simple_model(output_channels, image_shape):
-    inputs = tf.keras.layers.Input(image_shape)
+class UnetClassif(tf.keras.Model):
+    def __init__(self, *args, output_channels=3, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.down_stack = [
+            self.get_first_block(24),
+            self.get_down_block(48),
+            self.get_down_block(96),
+            self.get_down_block(192),
+            self.get_down_block(384),
+        ]
 
-    outputs = IdentityLayer()(inputs)
+        self.up_stack = [
+            UpBlock(192, upsampling_factor=8),
+            UpBlock(96, upsampling_factor=4),
+            UpBlock(48, upsampling_factor=2),
+            UpBlock(24, n_conv=1),
+        ]
+        self.last = tf.keras.Sequential([
+            tf.keras.layers.Conv2D(24, 3, activation='relu', padding='SAME'),
+            tf.keras.layers.Conv2D(output_channels,
+                                   1,
+                                   activation='sigmoid',
+                                   padding='SAME'),
+        ])
+        self.classifier = tf.keras.Sequential([
+            tf.keras.layers.GlobalAveragePooling2D(),
+            tf.keras.layers.Dense(128, activation="relu"),
+            tf.keras.layers.Dense(2, activation="softmax"),
+        ])
 
-    model = tf.keras.Model(inputs=[inputs], outputs=[outputs])
-    return model
+    def get_first_block(self, filters):
+        return tf.keras.Sequential([
+            ResidualLayer2D(filters, 7, padding='SAME'),
+            ResidualLayer2D(filters, 3, padding='SAME'),
+        ])
+
+    def get_down_block(self, filters):
+        return tf.keras.Sequential([
+            tf.keras.layers.MaxPool2D(pool_size=(2, 2), padding='SAME'),
+            ResidualLayer2D(filters, 3, padding='SAME'),
+            ResidualLayer2D(filters, 3, padding='SAME'),
+            ResidualLayer2D(filters, 3, padding='SAME'),
+        ])
+
+    def call(self, inputs, training=None):
+        x = inputs
+        skips = []
+        for block in self.down_stack:
+            x = block(x, training=training)
+            skips.append(x)
+
+        x_classif = self.classifier(x, training=training)
+        skips = reversed(skips[:-1])
+        xs_upsampled = []
+
+        for block, skip in zip(self.up_stack, skips):
+            x = block((x, skip), training=training)
+            if type(x) is tuple:
+                x, x_upsampled = x
+                xs_upsampled.append(x_upsampled)
+
+        x += tf.add_n(xs_upsampled)
+        return self.last(x), x_classif

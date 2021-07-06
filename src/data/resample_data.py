@@ -17,7 +17,7 @@ dotenv.load_dotenv(str(dotenv_path))
 
 path_data_nii = Path(os.environ["NII_PATH"])
 path_mask_lung_nii = Path(os.environ["NII_LUNG_PATH"])
-path_clinical_info = Path(os.environ["CLINIC_INFO_PATH"])
+# path_clinical_info = Path(os.environ["CLINIC_INFO_PATH"])
 
 path_output = project_dir / "data/interim/nii_resampled/"
 
@@ -53,7 +53,6 @@ class Resampler():
         output_path,
         output_shape=(512, 512),
         spacing=(1, 1, 1),
-        ct_window_str="lung",
         interp_order=3,
         mask_smoothing=False,
         smoothing_radius=3,
@@ -63,7 +62,6 @@ class Resampler():
         self.output_path = output_path
         self.output_shape = output_shape
         self.spacing = spacing
-        self.ct_window_str = ct_window_str
         self.interp_order = interp_order
         self.mask_smoothing = mask_smoothing
         self.smoothing_radius = smoothing_radius
@@ -152,16 +150,15 @@ def main():
     patient_list = [
         f.name.split("__")[0] for f in path_mask_lung_nii.rglob("*LUNG*")
     ]
-    clinical_df = pd.read_csv(path_clinical_info)
-    clinical_df["PatientID"] = clinical_df["patient_id"].map(
-        lambda x: "PatientLC_" + str(x))
+    # clinical_df = pd.read_csv(path_clinical_info)
+    # clinical_df["PatientID"] = clinical_df["patient_id"].map(
+    #     lambda x: "PatientLC_" + str(x))
     resampler = Resampler(
         path_data_nii,
         path_mask_lung_nii,
         path_output,
         output_shape=(512, 512),
         spacing=(1, 1, 1),
-        ct_window_str="lung",
         interp_order=3,
         mask_smoothing=False,
         smoothing_radius=3,

@@ -4,6 +4,8 @@ import tensorflow as tf
 import numpy as np
 from numpy.random import randint
 
+from src.models.data_augmentation import random_rotate
+
 
 def get_bb_mask_voxel(mask):
     positions = np.where(mask != 0)
@@ -21,18 +23,20 @@ def unravel_mask(mask):
                     axis=-1).astype(np.float32)
 
 
-def get_tf_data(file,
-                clinical_df,
-                output_shape=(256, 256),
-                random_slice=True,
-                centered_on_gtvt=False,
-                random_shift=None,
-                n_repeat=None,
-                num_parallel_calls=None,
-                oversample_plc_neg=False,
-                patient_list=None,
-                return_plc_status=False,
-                return_complete_gtvl=False):
+def get_tf_data(
+        file,
+        clinical_df,
+        output_shape=(256, 256),
+        random_slice=True,
+        centered_on_gtvt=False,
+        random_shift=None,
+        n_repeat=None,
+        num_parallel_calls=None,
+        oversample_plc_neg=False,
+        patient_list=None,
+        random_angle=None,
+        output_type="segmentation",  # "segmentation+plc_status", "plc_status"
+        return_complete_gtvl=False):
     """mask: mask_gtvt, mask_gtvl, mask_lung1, mask_lung2
 
     Args:
@@ -46,24 +50,26 @@ def get_tf_data(file,
         [type]: [description]
     """
     if patient_list is None:
-        patient_list = list(file.keys())
+        patient_list_copy = list(file.keys())
+    else:
+        patient_list_copy = patient_list.copy()
     if oversample_plc_neg:
         patient_list_plc_neg = [
-            p for p in patient_list
+            p for p in patient_list_copy
             if clinical_df.loc[int(p.split('_')[1]), "plc_status"] == 0
         ]
         patient_list_plc_pos = [
-            p for p in patient_list
+            p for p in patient_list_copy
             if clinical_df.loc[int(p.split('_')[1]), "plc_status"] == 1
         ]
         shuffle(patient_list_plc_neg)
         diff_patient = len(
             patient_list_plc_pos) - len(patient_list_plc_neg) * 2
         # patient_list = patient_list_plc_neg
-        patient_list.extend(patient_list_plc_neg)
-        patient_list.extend(patient_list_plc_neg[:diff_patient])
-    shuffle(patient_list)
-    patient_ds = tf.data.Dataset.from_tensor_slices(patient_list)
+        patient_list_copy.extend(patient_list_plc_neg)
+        patient_list_copy.extend(patient_list_plc_neg[:diff_patient])
+    shuffle(patient_list_copy)
+    patient_ds = tf.data.Dataset.from_tensor_slices(patient_list_copy)
     if n_repeat:
         patient_ds = patient_ds.repeat(n_repeat)
 
@@ -76,7 +82,7 @@ def get_tf_data(file,
         image = file[patient]["image"][()]
         mask = file[patient]["mask"][()]
         # mask = unravel_mask(file[patient]["mask"][()])
-        w, h, n_slices, c = image.shape
+        # w, h, n_slices, c = image.shape
         bb_lung = get_bb_mask_voxel(mask[..., 2] + mask[..., 3])
         center = ((bb_lung[:3] + bb_lung[3:]) // 2)[:2]
         bb_gtvl = get_bb_mask_voxel(mask[..., 1])
@@ -147,10 +153,21 @@ def get_tf_data(file,
             tf_f,
             num_parallel_calls=num_parallel_calls,
         )
+        if random_angle:
+            out_ds = out_ds.map(lambda x, y, p:
+                                (*random_rotate(x, y, angle=random_angle), p),
+                                num_parallel_calls=num_parallel_calls)
     else:
         out_ds = patient_ds.map(tf_f)
+        if random_angle:
+            out_ds = out_ds.map(lambda x, y, p:
+                                (*random_rotate(x, y, angle=random_angle), p))
 
-    if not return_complete_gtvl:
-        out_ds = out_ds.map(lambda x, y, p: (x, y))
-
-    return out_ds
+    if output_type == "segmentation":
+        return out_ds.map(lambda x, y, p: (x, y))
+    if output_type == "plc_status":
+        return out_ds.map(lambda x, y, p: (x, p))
+    if output_type == "segmentation+plc_status":
+        return out_ds.map(lambda x, y, p: (x, (y, p)))
+    else:
+        raise ValueError(f"the output_type {output_type} is not defined")

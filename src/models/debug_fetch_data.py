@@ -60,7 +60,7 @@ def main():
         output_shape=(256, 256),
         random_slice=False,
         centered_on_gtvt=True,
-        patient_list=patient_list_val,
+        patient_list_copy=patient_list_val,
     ).cache().batch(2)
     data_train = get_tf_data(file_train,
                              clinical_df,
@@ -70,7 +70,7 @@ def main():
                              n_repeat=10,
                              num_parallel_calls='auto',
                              oversample_plc_neg=True,
-                             patient_list=patient_list_train).batch(bs)
+                             patient_list_copy=patient_list_train).batch(bs)
 
     for x, y, plc_status in data_val.as_numpy_iterator():
         print(

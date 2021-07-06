@@ -16,11 +16,15 @@ dotenv_path = project_dir / ".env"
 
 dotenv.load_dotenv(str(dotenv_path))
 
+# path_data_nii = Path(
+#     "/home/val/python_wkspce/plc_seg/data/interim/nii_resampled")
+# path_mask_lung_nii = Path(
+#     "/home/val/python_wkspce/plc_seg/data/interim/nii_resampled")
 path_data_nii = Path(
-    "/home/val/python_wkspce/plc_seg/data/interim/nii_resampled")
+    "/home/valentin/python_wkspce/plc_seg/data/interim/nii_resampled")
 path_mask_lung_nii = Path(
-    "/home/val/python_wkspce/plc_seg/data/interim/nii_resampled")
-path_clinical_info = Path(os.environ["CLINIC_INFO_PATH"])
+    "/home/valentin/python_wkspce/plc_seg/data/interim/nii_resampled")
+# path_clinical_info = Path(os.environ["CLINIC_INFO_PATH"])
 
 path_output = project_dir / "data/processed/2d_pet_normalized"
 
@@ -168,40 +172,22 @@ def main():
     patient_list = [
         f.name.split("__")[0] for f in path_mask_lung_nii.rglob("*LUNG*")
     ]
-    clinical_df = pd.read_csv(path_clinical_info)
-    clinical_df["PatientID"] = clinical_df["patient_id"].map(
-        lambda x: "PatientLC_" + str(x))
-    patients_test = clinical_df[clinical_df["is_chuv"] == 0]["PatientID"]
-    patient_test = [p for p in patients_test if p in patient_list]
 
-    patients_train = clinical_df[clinical_df["is_chuv"] == 1]["PatientID"]
-    patient_train = [p for p in patients_train if p in patient_list]
-
-    path_file_test = ((path_output / 'test.hdf5').resolve())
-    path_file_test.unlink(missing_ok=True)  # delete file if exists
-    f_test = h5py.File(path_file_test, 'a')
-    for patient in tqdm(patient_test):
+    path_file = ((path_output / 'data.hdf5').resolve())
+    if path_file.exists():
+        path_file.unlink()  # delete file if exists
+    hdf5_file = h5py.File(path_file, 'a')
+    for patient in tqdm(patient_list):
 
         image, mask = parse_image(patient, path_data_nii, path_mask_lung_nii)
 
-        f_test.create_group(f"{patient}")
-        f_test.create_dataset(f"{patient}/image", data=image, dtype="float32")
-        f_test.create_dataset(f"{patient}/mask", data=mask, dtype="uint16")
+        hdf5_file.create_group(f"{patient}")
+        hdf5_file.create_dataset(f"{patient}/image",
+                                 data=image,
+                                 dtype="float32")
+        hdf5_file.create_dataset(f"{patient}/mask", data=mask, dtype="uint16")
 
-    f_test.close()
-
-    path_file_train = ((path_output / 'train.hdf5').resolve())
-    path_file_train.unlink(missing_ok=True)  # delete file if exists
-    f_test = h5py.File(path_file_train, 'a')
-    for patient in tqdm(patient_train):
-
-        image, mask = parse_image(patient, path_data_nii, path_mask_lung_nii)
-
-        f_test.create_group(f"{patient}")
-        f_test.create_dataset(f"{patient}/image", data=image, dtype="float32")
-        f_test.create_dataset(f"{patient}/mask", data=mask, dtype="uint16")
-
-    f_test.close()
+    hdf5_file.close()
 
 
 if __name__ == '__main__':
